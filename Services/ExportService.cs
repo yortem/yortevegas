@@ -51,6 +51,8 @@ public static class ExportService
         public double FadeOut;
         public double ManualIn;        // per-clip fade-in
         public double ManualOut;       // per-clip fade-out
+        public double CropLeft, CropRight, CropTop, CropBottom;
+        public double PanX, PanY;
         public double Start;
         public double Duration;
         public double SourceIn;
@@ -246,6 +248,12 @@ public static class ExportService
                     Opacity = Math.Clamp(clip.Opacity, 0, 1),
                     ManualIn = clip.FadeInSeconds,
                     ManualOut = clip.FadeOutSeconds,
+                    CropLeft = clip.CropLeft,
+                    CropRight = clip.CropRight,
+                    CropTop = clip.CropTop,
+                    CropBottom = clip.CropBottom,
+                    PanX = clip.PanX,
+                    PanY = clip.PanY,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
@@ -277,6 +285,12 @@ public static class ExportService
                     Volume = clip.Volume,
                     ManualIn = clip.FadeInSeconds,
                     ManualOut = clip.FadeOutSeconds,
+                    CropLeft = clip.CropLeft,
+                    CropRight = clip.CropRight,
+                    CropTop = clip.CropTop,
+                    CropBottom = clip.CropBottom,
+                    PanX = clip.PanX,
+                    PanY = clip.PanY,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
@@ -346,6 +360,7 @@ public static class ExportService
             if (clip.Clip.Kind == MediaKind.Image)
             {
                 video = $"[{clip.InputIndex}:v]fps={fps}," +
+                        BuildCropFilter(clip) +
                         $"scale={width}:{height}:force_original_aspect_ratio=decrease," +
                         $"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1," +
                         $"format=rgba,colorchannelmixer=aa={opacity}";
@@ -357,6 +372,7 @@ public static class ExportService
                     .ToString("0.######", CultureInfo.InvariantCulture);
                 video = $"[{clip.InputIndex}:v]trim=start={sourceIn}:duration={sourceDuration}," +
                         $"setpts=(PTS-STARTPTS)/{rate},fps={fps}," +
+                        BuildCropFilter(clip) +
                         $"scale={width}:{height}:force_original_aspect_ratio=decrease," +
                         $"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1," +
                         $"format=rgba,colorchannelmixer=aa={opacity}";
@@ -464,6 +480,21 @@ public static class ExportService
         }
 
         return string.Join(";", parts);
+    }
+
+    private static string BuildCropFilter(ClipInput clip)
+    {
+        var width = 1 - clip.CropLeft - clip.CropRight;
+        var height = 1 - clip.CropTop - clip.CropBottom;
+        if (width > 0.999 && height > 0.999) return "";
+
+        var x = Math.Clamp(clip.CropLeft + clip.PanX, 0, 1 - width);
+        var y = Math.Clamp(clip.CropTop + clip.PanY, 0, 1 - height);
+
+        static string F(double value) =>
+            value.ToString("0.######", CultureInfo.InvariantCulture);
+
+        return $"crop=iw*{F(width)}:ih*{F(height)}:iw*{F(x)}:ih*{F(y)},";
     }
 
     private static async Task RunFfmpegAsync(

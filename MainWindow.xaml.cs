@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using YorteVegas.Controls;
@@ -98,6 +99,7 @@ public partial class MainWindow : Window
         Timeline.RemoveTrackRequested += Timeline_RemoveTrackRequested;
         Timeline.RenameTrackRequested += Timeline_RenameTrackRequested;
         Timeline.ClipLevelChanged += (_, _) => _preview.RefreshClipVolume();
+        Timeline.CropPanRequested += CropPanClip;
 
         AttachProject(project);
         SetDirty(false);
@@ -268,6 +270,51 @@ public partial class MainWindow : Window
 
         PreviewPlaceholderText.Text = "Preview unavailable";
         PreviewPlaceholderHint.Text = "mpv could not open this file.";
+    }
+
+    private async void CropPanClip(TimelineClip clip)
+    {
+        _preview.Pause();
+
+        var time = Math.Clamp(
+            clip.StartSeconds + Math.Min(0.5, clip.DurationSeconds / 2),
+            clip.StartSeconds,
+            Math.Max(clip.StartSeconds, clip.EndSeconds - 0.01));
+        if (Math.Abs(_project.Playhead - time) > 0.02)
+            _project.Playhead = time;
+        _preview.Refresh();
+
+        BitmapSource? still = null;
+        for (var attempt = 0; attempt < 14 && still == null; attempt++)
+        {
+            await Task.Delay(120);
+            if (Preview.TryCaptureLayer(clip.Id, out var image))
+                still = image;
+        }
+
+        if (still == null)
+        {
+            FlashStatus("Could not capture the clip frame", error: true);
+            return;
+        }
+
+        var dialog = new CropPanDialog(clip, still) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+
+        _project.BeginEdit();
+        clip.CropLeft = dialog.CropLeft;
+        clip.CropRight = dialog.CropRight;
+        clip.CropTop = dialog.CropTop;
+        clip.CropBottom = dialog.CropBottom;
+
+        if (clip.CropLeft + clip.CropRight > 0.9)
+            clip.CropRight = Math.Max(0, 0.9 - clip.CropLeft);
+        if (clip.CropTop + clip.CropBottom > 0.9)
+            clip.CropBottom = Math.Max(0, 0.9 - clip.CropTop);
+
+        clip.PanX = dialog.PanX;
+        clip.PanY = dialog.PanY;
+        _project.NotifyTimelineChanged();
     }
 
     private void UpdateLevelMeter()

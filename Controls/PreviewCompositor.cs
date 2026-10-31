@@ -6,6 +6,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using YorteVegas.Models;
 
@@ -27,6 +29,12 @@ public sealed class PreviewLayer
     public double Aspect { get; init; } = 16.0 / 9.0;
     public bool Pending { get; init; }
     public bool Still { get; init; }
+    public double CropLeft { get; init; }
+    public double CropRight { get; init; }
+    public double CropTop { get; init; }
+    public double CropBottom { get; init; }
+    public double PanX { get; init; }
+    public double PanY { get; init; }
 }
 
 /// <summary>
@@ -59,6 +67,7 @@ public sealed class PreviewCompositor : HwndHost
     private uint _vbo;
     private uint _vao;
     private int _uScale = -1, _uOffset = -1, _uTex = -1, _uAlpha = -1;
+    private int _uUvScale = -1, _uUvOffset = -1;
 
     public event EventHandler Failed;
 
@@ -93,6 +102,50 @@ public sealed class PreviewCompositor : HwndHost
     public bool IsReady => _ready;
     public string Error => _error;
     public double FrameAspect { get; set; } = 16.0 / 9.0;
+
+    /// <summary>Grabs the last rendered source frame of a layer (for the crop editor).</summary>
+    public bool TryCaptureLayer(Guid key, out BitmapSource image)
+    {
+        image = null;
+        if (!_ready || _disposed || _hwnd == IntPtr.Zero || _glrc == IntPtr.Zero) return false;
+
+        try
+        {
+            MakeCurrent();
+            var layer = _layers.FirstOrDefault(l =>
+                l.Active && l.Key == key && l.Visual && l.Loaded && l.Fbo != 0);
+            if (layer == null) return false;
+
+            layer.Player.RenderTo(layer.Fbo, layer.TargetW, layer.TargetH);
+            _glBindFramebuffer(GL_FRAMEBUFFER, layer.Fbo);
+
+            var width = layer.TargetW;
+            var height = layer.TargetH;
+            var stride = width * 4;
+            var buffer = new byte[stride * height];
+            var handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+            try
+            {
+                glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, handle.AddrOfPinnedObject());
+            }
+            finally
+            {
+                handle.Free();
+                _glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            }
+
+            var bitmap = BitmapSource.Create(width, height, 96, 96,
+                PixelFormats.Bgra32, null, buffer, stride);
+            var flipped = new TransformedBitmap(bitmap, new ScaleTransform(1, -1));
+            flipped.Freeze();
+            image = flipped;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public void SetPlaying(bool playing)
     {
@@ -182,6 +235,12 @@ public sealed class PreviewCompositor : HwndHost
         layer.Opacity = Math.Clamp(spec.Opacity, 0, 1);
         layer.Volume = Math.Clamp(spec.Volume, 0, 2);
         layer.Aspect = spec.Aspect <= 0.01 ? 16.0 / 9.0 : spec.Aspect;
+        layer.CropLeft = Math.Clamp(spec.CropLeft, 0, 0.45);
+        layer.CropRight = Math.Clamp(spec.CropRight, 0, 0.45);
+        layer.CropTop = Math.Clamp(spec.CropTop, 0, 0.45);
+        layer.CropBottom = Math.Clamp(spec.CropBottom, 0, 0.45);
+        layer.PanX = Math.Clamp(spec.PanX, -1, 1);
+        layer.PanY = Math.Clamp(spec.PanY, -1, 1);
 
         if (!string.Equals(layer.Path, spec.Path, StringComparison.OrdinalIgnoreCase))
         {
@@ -343,7 +402,11 @@ public sealed class PreviewCompositor : HwndHost
             if (!layer.Active || layer.Pending || !layer.Visual || !layer.Loaded || layer.Fbo == 0) continue;
             if (layer.Opacity <= 0.002) continue;
 
-            var rect = FitInside(frame, layer.Aspect <= 0.01 ? 16.0 / 9.0 : layer.Aspect);
+            var cropWidth = Math.Max(0.05, 1 - layer.CropLeft - layer.CropRight);
+            var cropHeight = Math.Max(0.05, 1 - layer.CropTop - layer.CropBottom);
+            var croppedAspect = (layer.Aspect <= 0.01 ? 16.0 / 9.0 : layer.Aspect) *
+                                cropWidth / cropHeight;
+            var rect = FitInside(frame, croppedAspect);
             var scaleX = (float)((double)rect.Width / _pixelW);
             var scaleY = (float)((double)rect.Height / _pixelH);
             var offsetX = (float)((rect.X + rect.Width / 2.0) / _pixelW * 2 - 1);
@@ -352,6 +415,12 @@ public sealed class PreviewCompositor : HwndHost
             _glUniform2f(_uScale, scaleX, scaleY);
             _glUniform2f(_uOffset, offsetX, offsetY);
             _glUniform1f(_uAlpha, (float)layer.Opacity);
+
+            var uvX = Math.Clamp(layer.CropLeft + layer.PanX, 0, 1 - cropWidth);
+            var uvY = Math.Clamp(layer.CropTop + layer.PanY, 0, 1 - cropHeight);
+            _glUniform2f(_uUvScale, (float)cropWidth, (float)cropHeight);
+            _glUniform2f(_uUvOffset, (float)uvX, (float)uvY);
+
             glBindTexture(GL_TEXTURE_2D, layer.Texture);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
@@ -505,8 +574,14 @@ attribute vec2 aPos;
 attribute vec2 aUv;
 uniform vec2 uScale;
 uniform vec2 uOffset;
+uniform vec2 uUvScale;
+uniform vec2 uUvOffset;
 varying vec2 vUv;
-void main() { gl_Position = vec4(aPos * uScale + uOffset, 0.0, 1.0); vUv = aUv; }";
+void main()
+{
+    gl_Position = vec4(aPos * uScale + uOffset, 0.0, 1.0);
+    vUv = aUv * uUvScale + uUvOffset;
+}";
         const string fs = @"#version 110
 varying vec2 vUv;
 uniform sampler2D uTex;
@@ -526,6 +601,8 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         _uOffset = _glGetUniformLocation(_program, "uOffset");
         _uTex = _glGetUniformLocation(_program, "uTex");
         _uAlpha = _glGetUniformLocation(_program, "uAlpha");
+        _uUvScale = _glGetUniformLocation(_program, "uUvScale");
+        _uUvOffset = _glGetUniformLocation(_program, "uUvOffset");
 
         var verts = new float[]
         {
@@ -601,6 +678,12 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         public int TargetW = 1;
         public int TargetH = 1;
         public double TargetAspect;
+        public double CropLeft;
+        public double CropRight;
+        public double CropTop;
+        public double CropBottom;
+        public double PanX;
+        public double PanY;
         public double CachedRate = -1;
         public double CachedLoopA = -2;
         public double CachedLoopB = -2;
@@ -764,6 +847,7 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
     private const uint GL_SRC_ALPHA = 0x0302;
     private const uint GL_ONE_MINUS_SRC_ALPHA = 0x0303;
     private const uint GL_COLOR_BUFFER_BIT = 0x4000;
+    private const uint GL_BGRA = 0x80E1;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
@@ -848,6 +932,8 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         int border, uint format, uint type, IntPtr pixels);
     [DllImport("opengl32.dll")]
     private static extern void glDrawArrays(uint mode, int first, int count);
+    [DllImport("opengl32.dll")]
+    private static extern void glReadPixels(int x, int y, int width, int height, uint format, uint type, IntPtr pixels);
     [DllImport("opengl32.dll")]
     private static extern int glGetError();
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]

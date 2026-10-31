@@ -192,9 +192,3 @@ foundation. Timeline mutations go through `EditProject`, which raises
 `TimelineChanged` and supports undo snapshots. The preview is driven by
 `TimelinePreview`, which owns the playback state machine and never touches WPF
 controls from mpv callbacks.
-
-## Credits
-
-- UI palette and shell patterns reused from YorteImpact.
-- libmpv integration pattern adapted from the mpv-ytheme player (HwndHost + DWM dark
-  chrome, serialized player access).

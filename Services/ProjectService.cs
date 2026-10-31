@@ -81,7 +81,13 @@ public static class ProjectService
                     Volume = clip.Volume,
                     PlaybackRate = clip.PlaybackRate,
                     FadeIn = clip.FadeInSeconds,
-                    FadeOut = clip.FadeOutSeconds
+                    FadeOut = clip.FadeOutSeconds,
+                    CropLeft = clip.CropLeft,
+                    CropRight = clip.CropRight,
+                    CropTop = clip.CropTop,
+                    CropBottom = clip.CropBottom,
+                    PanX = clip.PanX,
+                    PanY = clip.PanY
                 });
             }
             file.Tracks.Add(trackDto);
@@ -143,7 +149,13 @@ public static class ProjectService
                     Volume = Math.Clamp(c.Volume ?? 1, 0, 1),
                     PlaybackRate = Math.Clamp(c.PlaybackRate ?? 1, 0.1, 10),
                     FadeInSeconds = Math.Clamp(c.FadeIn ?? 0, 0, 30),
-                    FadeOutSeconds = Math.Clamp(c.FadeOut ?? 0, 0, 30)
+                    FadeOutSeconds = Math.Clamp(c.FadeOut ?? 0, 0, 30),
+                    CropLeft = Math.Clamp(c.CropLeft ?? 0, 0, 0.95),
+                    CropRight = Math.Clamp(c.CropRight ?? 0, 0, 0.95),
+                    CropTop = Math.Clamp(c.CropTop ?? 0, 0, 0.95),
+                    CropBottom = Math.Clamp(c.CropBottom ?? 0, 0, 0.95),
+                    PanX = Math.Clamp(c.PanX ?? 0, -1, 1),
+                    PanY = Math.Clamp(c.PanY ?? 0, -1, 1)
                 });
             }
             project.Tracks.Add(track);
@@ -279,5 +291,11 @@ public sealed class ClipDto
     public double? Volume { get; set; } = 1;
     public double? FadeIn { get; set; }
     public double? FadeOut { get; set; }
+    public double? CropLeft { get; set; }
+    public double? CropRight { get; set; }
+    public double? CropTop { get; set; }
+    public double? CropBottom { get; set; }
+    public double? PanX { get; set; }
+    public double? PanY { get; set; }
     public double? PlaybackRate { get; set; } = 1;
 }

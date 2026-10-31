@@ -17,6 +17,12 @@ public sealed class TimelineClip : ObservableObject
     private double _playbackRate = 1;
     private double _fadeInSeconds;
     private double _fadeOutSeconds;
+    private double _cropLeft;
+    private double _cropRight;
+    private double _cropTop;
+    private double _cropBottom;
+    private double _panX;
+    private double _panY;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AssetId { get; set; }
@@ -87,6 +93,48 @@ public sealed class TimelineClip : ObservableObject
     /// slow motion (Ctrl-drag the right edge). Timeline duration × rate is the
     /// amount of source media the clip consumes.
     /// </summary>
+    /// <summary>Crop fractions of the source (0..0.9 in total per axis).</summary>
+    public double CropLeft
+    {
+        get => _cropLeft;
+        set => SetProperty(ref _cropLeft, Math.Clamp(value, 0, 0.95));
+    }
+
+    public double CropRight
+    {
+        get => _cropRight;
+        set => SetProperty(ref _cropRight, Math.Clamp(value, 0, 0.95));
+    }
+
+    public double CropTop
+    {
+        get => _cropTop;
+        set => SetProperty(ref _cropTop, Math.Clamp(value, 0, 0.95));
+    }
+
+    public double CropBottom
+    {
+        get => _cropBottom;
+        set => SetProperty(ref _cropBottom, Math.Clamp(value, 0, 0.95));
+    }
+
+    /// <summary>Pan offset in source fractions (-1..1), clamped to the cropped window.</summary>
+    public double PanX
+    {
+        get => _panX;
+        set => SetProperty(ref _panX, Math.Clamp(value, -1, 1));
+    }
+
+    public double PanY
+    {
+        get => _panY;
+        set => SetProperty(ref _panY, Math.Clamp(value, -1, 1));
+    }
+
+    public bool HasCrop => _cropLeft > 0.001 || _cropRight > 0.001 ||
+                           _cropTop > 0.001 || _cropBottom > 0.001 ||
+                           Math.Abs(_panX) > 0.001 || Math.Abs(_panY) > 0.001;
+
     /// <summary>Manual fade-in at the start of the clip, in project seconds.</summary>
     public double FadeInSeconds
     {

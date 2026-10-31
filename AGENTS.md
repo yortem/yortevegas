@@ -170,6 +170,16 @@ single `MpvPreview` window player, which could only show one file.
 - The export audio mix ends with `alimiter=limit=0.95` so loud sums do not clip.
   The monitor meter is driven by `TimelinePreview.AudioLevel`, which reads the
   waveform peak at the playhead (a content meter, not a live output meter).
+- Crop/pan lives on `TimelineClip.CropLeft/Right/Top/Bottom` (source fractions) and
+  `PanX/PanY` (source fractions, clamped into the crop window). The preview maps the
+  crop window through UV uniforms in the compositor; the export applies an FFmpeg
+  `crop` filter before scale/pad. The clip menu opens the visual `CropPanDialog`:
+  it captures the layer FBO with `PreviewCompositor.TryCaptureLayer` and lets the
+  user drag the visible box (`CropEditor`). Crop edges go up to 0.95 each and are
+  clamped together on apply.
+- Copy/paste style (`ClipStyleClipboard`) carries opacity, volume, fades and
+  crop/pan between clips from the clip context menu; it deliberately excludes
+  timing (start, in-point, duration, rate).
 - `TimelinePreview` builds one `PreviewLayer` per active clip, bottom track
   first, alpha = clip opacity x fade-curve progress. Video clips keep their own
   audio; audio-track clips are visual-less layers. The next clip is preloaded up

@@ -393,9 +393,10 @@ public sealed class TimelinePreview
 
         var rate = Math.Max(0.1, clip.PlaybackRate);
         var looped = IsLooped(clip, asset);
-        var aspect = asset.Width > 0 && asset.Height > 0
+        var sourceAspect = asset.Width > 0 && asset.Height > 0
             ? (double)asset.Width / asset.Height
             : 16.0 / 9.0;
+        var aspect = sourceAspect;
 
         specs.Add(new PreviewLayer
         {
@@ -410,7 +411,13 @@ public sealed class TimelinePreview
             LoopB = looped ? asset.DurationSeconds : -1,
             HasVisual = visual,
             Aspect = aspect,
-            Still = clip.Kind == MediaKind.Image
+            Still = clip.Kind == MediaKind.Image,
+            CropLeft = clip.CropLeft,
+            CropRight = clip.CropRight,
+            CropTop = clip.CropTop,
+            CropBottom = clip.CropBottom,
+            PanX = clip.PanX,
+            PanY = clip.PanY
         });
     }
 

@@ -388,7 +388,13 @@ public sealed class EditProject : ObservableObject
             Volume = clip.Volume,
             PlaybackRate = clip.PlaybackRate,
             FadeInSeconds = 0,
-            FadeOutSeconds = Math.Min(clip.FadeOutSeconds, clip.EndSeconds - splitAt)
+            FadeOutSeconds = Math.Min(clip.FadeOutSeconds, clip.EndSeconds - splitAt),
+            CropLeft = clip.CropLeft,
+            CropRight = clip.CropRight,
+            CropTop = clip.CropTop,
+            CropBottom = clip.CropBottom,
+            PanX = clip.PanX,
+            PanY = clip.PanY
         };
 
         clip.DurationSeconds = splitAt - clip.StartSeconds;
@@ -445,7 +451,13 @@ public sealed class EditProject : ObservableObject
             Volume = clip.Volume,
             PlaybackRate = clip.PlaybackRate,
             FadeInSeconds = clip.FadeInSeconds,
-            FadeOutSeconds = clip.FadeOutSeconds
+            FadeOutSeconds = clip.FadeOutSeconds,
+            CropLeft = clip.CropLeft,
+            CropRight = clip.CropRight,
+            CropTop = clip.CropTop,
+            CropBottom = clip.CropBottom,
+            PanX = clip.PanX,
+            PanY = clip.PanY
         };
         track.Clips.Add(copy);
         SelectedClipId = copy.Id;

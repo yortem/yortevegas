@@ -204,6 +204,9 @@ public sealed class TimelineView : FrameworkElement
     /// <summary>Raised continuously while an opacity / volume line is dragged.</summary>
     public event EventHandler? ClipLevelChanged;
 
+    /// <summary>Raised when the user asks to crop or pan a visual clip.</summary>
+    public event Action<TimelineClip>? CropPanRequested;
+
     /// <summary>Position where a dropped item would start, snapped to a frame.</summary>
     public double DropTimeAtPoint(Point point) =>
         _project?.SnapToFrame(Math.Max(0, TimeAtPoint(point))) ?? 0;
@@ -1838,6 +1841,34 @@ public sealed class TimelineView : FrameworkElement
             _project.DeleteClip(clip);
         };
 
+        var copyStyle = new MenuItem
+        {
+            Header = "Copy style",
+            Icon = MenuIcon("M 4,2 H 10 V 10 H 4 Z M 6,6 H 12 V 12 H 6 Z")
+        };
+        copyStyle.Click += (_, _) => ClipStyleClipboard.Copy(clip);
+
+        var pasteStyle = new MenuItem
+        {
+            Header = "Paste style",
+            IsEnabled = ClipStyleClipboard.HasStyle,
+            Icon = MenuIcon("M 4,3 H 12 V 13 H 4 Z M 6,1 H 10 V 3 H 6 Z")
+        };
+        pasteStyle.Click += (_, _) =>
+        {
+            if (_project == null || !ClipStyleClipboard.HasStyle) return;
+            _project.BeginEdit();
+            ClipStyleClipboard.ApplyTo(clip);
+            _project.NotifyTimelineChanged();
+        };
+
+        var crop = new MenuItem
+        {
+            Header = "Crop && pan...",
+            Icon = MenuIcon("M 3,3 H 11 V 11 H 3 Z M 1,5 H 13 M 5,1 V 13")
+        };
+        crop.Click += (_, _) => CropPanRequested?.Invoke(clip);
+
         var fadeIn = new MenuItem
         {
             Header = clip.FadeInSeconds > 0.01 ? "Remove fade in" : "Fade in (0.5 s)",
@@ -1854,6 +1885,11 @@ public sealed class TimelineView : FrameworkElement
 
         menu.Items.Add(split);
         menu.Items.Add(duplicate);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(copyStyle);
+        menu.Items.Add(pasteStyle);
+        if (clip.Kind != MediaKind.Audio)
+            menu.Items.Add(crop);
         menu.Items.Add(new Separator());
         menu.Items.Add(fadeIn);
         menu.Items.Add(fadeOut);
