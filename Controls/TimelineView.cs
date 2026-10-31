@@ -822,7 +822,8 @@ public sealed class TimelineView : FrameworkElement
         if (rect.Width > 26 && rect.Height > 18)
         {
             var isAudio = clip.Kind == MediaKind.Audio;
-            var level = isAudio ? clip.Volume : clip.Opacity;
+            var volumeLevel = IsVolumeLevel(clip);
+            var level = volumeLevel ? clip.Volume : clip.Opacity;
             var levelTop = LevelTop(rect, clip);
             var levelBottom = LevelBottom(rect);
             var levelHeight = Math.Max(1, levelBottom - levelTop);
@@ -833,7 +834,7 @@ public sealed class TimelineView : FrameworkElement
                          (_hoverLevel is { } hover && hover.ClipId == clip.Id);
 
             var levelBrush = active
-                ? (isAudio ? AudioLevelActiveBrush : LevelActiveBrush)
+                ? (volumeLevel ? AudioLevelActiveBrush : LevelActiveBrush)
                 : LevelLineBrush;
             var levelPen = new Pen(levelBrush, active ? 1.8 : 1.1);
             dc.DrawLine(levelPen,
@@ -850,6 +851,9 @@ public sealed class TimelineView : FrameworkElement
             }
         }
 
+        if (clip.FadeInSeconds > 0.01 || clip.FadeOutSeconds > 0.01)
+            DrawManualFades(dc, clip, rect);
+
         var borderBrush = isSelected ? AmberBrush : isHovered ? HoverBorderBrush : ClipBorderBrush;
         var pen = new Pen(borderBrush, isSelected ? 1.5 : 1);
         dc.DrawRoundedRectangle(null, pen, rect, radius, radius);
@@ -865,6 +869,24 @@ public sealed class TimelineView : FrameworkElement
             if (right)
                 dc.DrawRoundedRectangle(handleBrush, null,
                     new Rect(rect.Right - 4, rect.Y + rect.Height / 2 - 8, 3, 16), 1.5, 1.5);
+        }
+    }
+
+    private static void DrawManualFades(DrawingContext dc, TimelineClip clip, Rect rect)
+    {
+        var duration = Math.Max(0.001, clip.DurationSeconds);
+        var pen = new Pen(FrozenArgb(130, 210, 230, 250), 1);
+
+        if (clip.FadeInSeconds > 0.01)
+        {
+            var width = Math.Min(rect.Width * 0.5, rect.Width * Math.Min(1, clip.FadeInSeconds / duration));
+            dc.DrawLine(pen, new Point(rect.X + 1, rect.Bottom - 1), new Point(rect.X + width, rect.Y + 1));
+        }
+
+        if (clip.FadeOutSeconds > 0.01)
+        {
+            var width = Math.Min(rect.Width * 0.5, rect.Width * Math.Min(1, clip.FadeOutSeconds / duration));
+            dc.DrawLine(pen, new Point(rect.Right - width, rect.Y + 1), new Point(rect.Right - 1, rect.Bottom - 1));
         }
     }
 
@@ -912,9 +934,13 @@ public sealed class TimelineView : FrameworkElement
         return Math.Abs(desiredEnd - regularEnd) <= threshold ? regularEnd : desiredEnd;
     }
 
+    private static bool IsVolumeLevel(TimelineClip clip) =>
+        clip.Kind == MediaKind.Audio ||
+        (clip.Kind == MediaKind.Video && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift));
+
     private bool TryGetLevelHit(TimelineTrack track, TimelineClip clip, Point p, out double level)
     {
-        level = clip.Kind == MediaKind.Audio ? clip.Volume : clip.Opacity;
+        level = IsVolumeLevel(clip) ? clip.Volume : clip.Opacity;
         var rect = ClipRect(track, clip);
         if (rect.Width < 30 || rect.Height < 18) return false;
 
@@ -1181,12 +1207,12 @@ public sealed class TimelineView : FrameworkElement
             if (clip != null && hoverLevel.Track.Clips.Contains(clip))
             {
                 var rect = ClipRect(hoverLevel.Track, clip);
-                var isAudio = clip.Kind == MediaKind.Audio;
-                var level = isAudio ? clip.Volume : clip.Opacity;
+                var volumeLevel = IsVolumeLevel(clip);
+                var level = volumeLevel ? clip.Volume : clip.Opacity;
                 var top = LevelTop(rect, clip);
                 var bottom = LevelBottom(rect);
                 var lineY = bottom - level * Math.Max(1, bottom - top);
-                var label = isAudio
+                var label = volumeLevel
                     ? $"Volume {level * 100:0}% ֲ· drag up/down"
                     : $"Opacity {level * 100:0}% ֲ· drag up/down";
                 DrawTooltipBox(dc, label, rect.X + 8, lineY - 25, width);
@@ -1466,7 +1492,7 @@ public sealed class TimelineView : FrameworkElement
 
         if (!_razorMode && TryGetLevelHit(track, hitClip, p, out var level))
         {
-            _drag = hitClip.Kind == MediaKind.Audio ? DragMode.Volume : DragMode.Opacity;
+            _drag = IsVolumeLevel(hitClip) ? DragMode.Volume : DragMode.Opacity;
             _dragClip = hitClip;
             _dragStartPoint = p;
             _dragLevelStart = level;
@@ -1811,13 +1837,45 @@ public sealed class TimelineView : FrameworkElement
             _project.BeginEdit();
             _project.DeleteClip(clip);
         };
+
+        var fadeIn = new MenuItem
+        {
+            Header = clip.FadeInSeconds > 0.01 ? "Remove fade in" : "Fade in (0.5 s)",
+            Icon = MenuIcon("M 2,12 L 12,2 V 12 Z")
+        };
+        fadeIn.Click += (_, _) => ToggleClipFade(clip, fadeIn: true);
+
+        var fadeOut = new MenuItem
+        {
+            Header = clip.FadeOutSeconds > 0.01 ? "Remove fade out" : "Fade out (0.5 s)",
+            Icon = MenuIcon("M 2,2 L 12,12 H 2 Z")
+        };
+        fadeOut.Click += (_, _) => ToggleClipFade(clip, fadeIn: false);
+
         menu.Items.Add(split);
         menu.Items.Add(duplicate);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(fadeIn);
+        menu.Items.Add(fadeOut);
         menu.Items.Add(new Separator());
         menu.Items.Add(delete);
         menu.PlacementTarget = this;
         menu.IsOpen = true;
         e.Handled = true;
+    }
+
+    private void ToggleClipFade(TimelineClip clip, bool fadeIn)
+    {
+        if (_project == null) return;
+
+        _project.BeginEdit();
+        var length = Math.Min(0.5, Math.Max(_project.FrameDuration, clip.DurationSeconds * 0.4));
+        if (fadeIn)
+            clip.FadeInSeconds = clip.FadeInSeconds > 0.01 ? 0 : length;
+        else
+            clip.FadeOutSeconds = clip.FadeOutSeconds > 0.01 ? 0 : length;
+        _project.NotifyTimelineChanged();
+        InvalidateVisual();
     }
 
     private static System.Windows.Shapes.Path MenuIcon(string data) => new()

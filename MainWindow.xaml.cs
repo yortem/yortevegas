@@ -25,6 +25,10 @@ public partial class MainWindow : Window
     private static readonly Brush ReadyDotBrush = Freeze("#3DDC97");
     private static readonly Brush WarnDotBrush = Freeze("#F2B23A");
     private static readonly Brush ErrorDotBrush = Freeze("#F87171");
+    private static readonly Brush LevelOkBrush = Freeze("#3DDC97");
+    private static readonly Brush LevelWarnBrush = Freeze("#F2B23A");
+    private static readonly Brush LevelPeakBrush = Freeze("#F87171");
+    private readonly DispatcherTimer _levelTimer;
 
     private readonly AppSettings _settings;
     private readonly TimelinePreview _preview;
@@ -49,6 +53,10 @@ public partial class MainWindow : Window
         _startupProject = startupProject;
         _startupImports = startupImports;
         InitializeComponent();
+
+        _levelTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _levelTimer.Tick += (_, _) => UpdateLevelMeter();
+        _levelTimer.Start();
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
         _statusTimer.Tick += (_, _) =>
@@ -260,6 +268,15 @@ public partial class MainWindow : Window
 
         PreviewPlaceholderText.Text = "Preview unavailable";
         PreviewPlaceholderHint.Text = "mpv could not open this file.";
+    }
+
+    private void UpdateLevelMeter()
+    {
+        var level = Math.Clamp(_preview.AudioLevel, 0, 1);
+        LevelMeterFill.Width = 46 * level;
+        LevelMeterFill.Fill = level >= 0.92
+            ? LevelPeakBrush
+            : level >= 0.72 ? LevelWarnBrush : LevelOkBrush;
     }
 
     private void SetDirty(bool dirty)

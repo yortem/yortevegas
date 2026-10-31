@@ -46,9 +46,11 @@ public static class ExportService
         public bool HasAudio;
         public double Volume;
         public double Opacity = 1;
-        public double FadeIn;          // seconds from the clip start
-        public double FadeOutAt = -1;  // local seconds
+        public double FadeIn;          // overlap fade-in, seconds from the clip start
+        public double FadeOutAt = -1;  // overlap fade-out, local seconds
         public double FadeOut;
+        public double ManualIn;        // per-clip fade-in
+        public double ManualOut;       // per-clip fade-out
         public double Start;
         public double Duration;
         public double SourceIn;
@@ -242,6 +244,8 @@ public static class ExportService
                     HasAudio = asset.HasAudio && clip.Kind != MediaKind.Image,
                     Volume = (track.IsMuted || (anySolo && !track.IsSolo)) ? 0 : clip.Volume,
                     Opacity = Math.Clamp(clip.Opacity, 0, 1),
+                    ManualIn = clip.FadeInSeconds,
+                    ManualOut = clip.FadeOutSeconds,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
@@ -271,6 +275,8 @@ public static class ExportService
                     Visual = false,
                     HasAudio = asset.HasAudio,
                     Volume = clip.Volume,
+                    ManualIn = clip.FadeInSeconds,
+                    ManualOut = clip.FadeOutSeconds,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
@@ -363,6 +369,22 @@ public static class ExportService
                          ":alpha=1";
             }
 
+            if (clip.ManualIn > 0.01)
+            {
+                video += ",fade=t=in:st=0:d=" +
+                         clip.ManualIn.ToString("0.######", CultureInfo.InvariantCulture) +
+                         ":alpha=1";
+            }
+
+            if (clip.ManualOut > 0.01)
+            {
+                var fadeStart = Math.Max(0, clip.Duration - clip.ManualOut);
+                video += ",fade=t=out:st=" +
+                         fadeStart.ToString("0.######", CultureInfo.InvariantCulture) +
+                         ":d=" + clip.ManualOut.ToString("0.######", CultureInfo.InvariantCulture) +
+                         ":alpha=1";
+            }
+
             video += $",setpts=PTS+{start}/TB[v{i}]";
             parts.Add(video);
 
@@ -408,6 +430,20 @@ public static class ExportService
                          ":d=" + clip.FadeOut.ToString("0.######", CultureInfo.InvariantCulture) + ",";
             }
 
+            if (clip.ManualIn > 0.01)
+            {
+                chain += "afade=t=in:st=0:d=" +
+                         clip.ManualIn.ToString("0.######", CultureInfo.InvariantCulture) + ",";
+            }
+
+            if (clip.ManualOut > 0.01)
+            {
+                var fadeStart = Math.Max(0, clip.Duration - clip.ManualOut);
+                chain += "afade=t=out:st=" +
+                         fadeStart.ToString("0.######", CultureInfo.InvariantCulture) +
+                         ":d=" + clip.ManualOut.ToString("0.######", CultureInfo.InvariantCulture) + ",";
+            }
+
             chain += $"atrim=duration={duration},asetpts=PTS-STARTPTS," +
                      $"adelay={delay}:all=1[a{audioIndex}]";
             parts.Add(chain);
@@ -423,6 +459,7 @@ public static class ExportService
         {
             parts.Add(string.Concat(audioInputs) +
                       $"amix=inputs={audioInputs.Count}:normalize=0:duration=longest," +
+                      $"alimiter=limit=0.95:attack=5:release=50," +
                       $"atrim=duration={totalText},asetpts=PTS-STARTPTS[a]");
         }
 

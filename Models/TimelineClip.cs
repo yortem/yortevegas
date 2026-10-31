@@ -15,6 +15,8 @@ public sealed class TimelineClip : ObservableObject
     private double _opacity = 1;
     private double _volume = 1;
     private double _playbackRate = 1;
+    private double _fadeInSeconds;
+    private double _fadeOutSeconds;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AssetId { get; set; }
@@ -85,6 +87,20 @@ public sealed class TimelineClip : ObservableObject
     /// slow motion (Ctrl-drag the right edge). Timeline duration × rate is the
     /// amount of source media the clip consumes.
     /// </summary>
+    /// <summary>Manual fade-in at the start of the clip, in project seconds.</summary>
+    public double FadeInSeconds
+    {
+        get => _fadeInSeconds;
+        set => SetProperty(ref _fadeInSeconds, Math.Clamp(value, 0, 30));
+    }
+
+    /// <summary>Manual fade-out at the end of the clip, in project seconds.</summary>
+    public double FadeOutSeconds
+    {
+        get => _fadeOutSeconds;
+        set => SetProperty(ref _fadeOutSeconds, Math.Clamp(value, 0, 30));
+    }
+
     public double PlaybackRate
     {
         get => _playbackRate;

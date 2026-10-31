@@ -597,6 +597,11 @@
                 <Path Data="M4 9 L8 5 V19 L4 15 H2 V9 Z M11 8 A4 4 0 0 1 11 16 M13.5 5.5 A7.5 7.5 0 0 1 13.5 18.5"
                       Width="13" Height="13" Stretch="Uniform" Stroke="#6E8095" StrokeThickness="1.4"
                       StrokeLineJoin="Round" VerticalAlignment="Center"/>
+                <Border Width="46" Height="4" Background="#101A26" CornerRadius="2"
+                        Margin="9,0,3,0" VerticalAlignment="Center" ToolTip="Output level">
+                  <Rectangle x:Name="LevelMeterFill" HorizontalAlignment="Left" Width="0"
+                             RadiusX="2" RadiusY="2" Fill="#3DDC97"/>
+                </Border>
                 <Slider x:Name="VolumeSlider" Style="{StaticResource ThinSlider}" Width="76" Minimum="0" Maximum="100"
                         SmallChange="1" LargeChange="5" Margin="7,0,0,0" VerticalAlignment="Center"
                         ValueChanged="VolumeSlider_ValueChanged" ToolTip="Preview volume"/>

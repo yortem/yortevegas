@@ -386,10 +386,14 @@ public sealed class EditProject : ObservableObject
             FadeCurve = FadeCurveKind.Linear,
             Opacity = clip.Opacity,
             Volume = clip.Volume,
-            PlaybackRate = clip.PlaybackRate
+            PlaybackRate = clip.PlaybackRate,
+            FadeInSeconds = 0,
+            FadeOutSeconds = Math.Min(clip.FadeOutSeconds, clip.EndSeconds - splitAt)
         };
 
         clip.DurationSeconds = splitAt - clip.StartSeconds;
+        clip.FadeOutSeconds = 0;
+        clip.FadeInSeconds = Math.Min(clip.FadeInSeconds, clip.DurationSeconds);
         track.Clips.Add(right);
         SelectedClipId = right.Id;
         NotifyTimelineChanged();
@@ -439,7 +443,9 @@ public sealed class EditProject : ObservableObject
             FadeCurve = clip.FadeCurve,
             Opacity = clip.Opacity,
             Volume = clip.Volume,
-            PlaybackRate = clip.PlaybackRate
+            PlaybackRate = clip.PlaybackRate,
+            FadeInSeconds = clip.FadeInSeconds,
+            FadeOutSeconds = clip.FadeOutSeconds
         };
         track.Clips.Add(copy);
         SelectedClipId = copy.Id;

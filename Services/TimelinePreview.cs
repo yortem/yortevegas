@@ -54,6 +54,9 @@ public sealed class TimelinePreview
     public bool IsPlaying => _isPlaying;
     public bool HasMedia => _hasMedia;
     public bool HasVisual => _hasVisual;
+
+    /// <summary>Content peak at the playhead, for the monitor level meter (0..1).</summary>
+    public double AudioLevel { get; private set; }
     public string CompositorError => _compositor.Error ?? "";
 
     public void SetBaseVolume(double value)
@@ -192,6 +195,7 @@ public sealed class TimelinePreview
             ? _anchorProject + (DateTime.UtcNow - _anchorWall).TotalSeconds
             : _project.Playhead;
 
+        AudioLevel = 0;
         var specs = BuildLayers(time);
         var pending = BuildPending(time, specs);
         if (pending != null) specs.Add(pending);
@@ -367,6 +371,19 @@ public sealed class TimelinePreview
         if (asset == null || asset.IsMissing || !File.Exists(asset.FilePath)) return;
         if (specs.Any(s => s.Key == clip.Id)) return;
 
+        var manualFade = ManualFadeFactor(clip, time);
+        alpha *= manualFade;
+        gain *= manualFade;
+
+        if (asset.Peaks is { Length: > 0 } peaks && gain > 0.0001)
+        {
+            var index = (int)Math.Clamp(
+                asset.DurationSeconds > 0.01 ? SourceTimeFor(clip, asset, time) / asset.DurationSeconds : 0,
+                0, 1) * (peaks.Length - 1);
+            var peak = peaks[Math.Clamp(index, 0, peaks.Length - 1)] * Math.Clamp(gain, 0, 1);
+            if (peak > AudioLevel) AudioLevel = peak;
+        }
+
         var isNew = !_lastActive.Contains(clip.Id);
         if (isNew || _globalSeek || !_tokens.TryGetValue(clip.Id, out var token))
         {
@@ -415,6 +432,16 @@ public sealed class TimelinePreview
         if (available > 0.05 && IsLooped(clip, asset)) offset %= available;
 
         return clip.InSeconds + offset;
+    }
+
+    private static double ManualFadeFactor(TimelineClip clip, double time)
+    {
+        var factor = 1.0;
+        if (clip.FadeInSeconds > 0.001 && time < clip.StartSeconds + clip.FadeInSeconds)
+            factor *= Math.Clamp((time - clip.StartSeconds) / clip.FadeInSeconds, 0, 1);
+        if (clip.FadeOutSeconds > 0.001 && time > clip.EndSeconds - clip.FadeOutSeconds)
+            factor *= Math.Clamp((clip.EndSeconds - time) / clip.FadeOutSeconds, 0, 1);
+        return factor;
     }
 
     private static double Ease(double t, FadeCurveKind kind) => kind switch

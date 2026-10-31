@@ -79,7 +79,9 @@ public static class ProjectService
                     FadeCurve = clip.FadeCurve,
                     Opacity = clip.Opacity,
                     Volume = clip.Volume,
-                    PlaybackRate = clip.PlaybackRate
+                    PlaybackRate = clip.PlaybackRate,
+                    FadeIn = clip.FadeInSeconds,
+                    FadeOut = clip.FadeOutSeconds
                 });
             }
             file.Tracks.Add(trackDto);
@@ -139,7 +141,9 @@ public static class ProjectService
                     FadeCurve = c.FadeCurve,
                     Opacity = Math.Clamp(c.Opacity ?? 1, 0, 1),
                     Volume = Math.Clamp(c.Volume ?? 1, 0, 1),
-                    PlaybackRate = Math.Clamp(c.PlaybackRate ?? 1, 0.1, 10)
+                    PlaybackRate = Math.Clamp(c.PlaybackRate ?? 1, 0.1, 10),
+                    FadeInSeconds = Math.Clamp(c.FadeIn ?? 0, 0, 30),
+                    FadeOutSeconds = Math.Clamp(c.FadeOut ?? 0, 0, 30)
                 });
             }
             project.Tracks.Add(track);
@@ -273,5 +277,7 @@ public sealed class ClipDto
     public FadeCurveKind FadeCurve { get; set; } = FadeCurveKind.Linear;
     public double? Opacity { get; set; } = 1;
     public double? Volume { get; set; } = 1;
+    public double? FadeIn { get; set; }
+    public double? FadeOut { get; set; }
     public double? PlaybackRate { get; set; } = 1;
 }

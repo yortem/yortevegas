@@ -162,6 +162,14 @@ single `MpvPreview` window player, which could only show one file.
 - Ctrl+drag on a clip body duplicates it and drags the copy (deferred until the
   mouse actually moves, so a Ctrl+click does not duplicate). Ctrl+drag on the
   right edge is still time-stretch.
+- Shift+drag the level line on a video clip adjusts its **volume**; a normal drag
+  still adjusts opacity. Audio clips always use the line for volume.
+- Manual fades live on `TimelineClip.FadeInSeconds`/`FadeOutSeconds`; the clip menu
+  toggles 0.5 s fades, the preview multiplies them into alpha/audio gain, and the
+  export adds `fade`/`afade` filters. They are persisted in `ClipDto`.
+- The export audio mix ends with `alimiter=limit=0.95` so loud sums do not clip.
+  The monitor meter is driven by `TimelinePreview.AudioLevel`, which reads the
+  waveform peak at the playhead (a content meter, not a live output meter).
 - `TimelinePreview` builds one `PreviewLayer` per active clip, bottom track
   first, alpha = clip opacity x fade-curve progress. Video clips keep their own
   audio; audio-track clips are visual-less layers. The next clip is preloaded up
