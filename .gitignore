@@ -1,0 +1,8 @@
+bin/
+obj/
+*.user
+*.suo
+*_wpftmp.csproj
+mpv.log
+crash.log
+.vs/
