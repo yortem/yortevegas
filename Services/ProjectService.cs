@@ -101,7 +101,8 @@ public static class ProjectService
                         Values = new Dictionary<string, double>(e.Values)
                     }).ToList(),
                     TransitionIn = CaptureTransition(clip.TransitionIn),
-                    TransitionOut = CaptureTransition(clip.TransitionOut)
+                    TransitionOut = CaptureTransition(clip.TransitionOut),
+                    Text = CaptureText(clip.Text)
                 });
             }
             file.Tracks.Add(trackDto);
@@ -149,7 +150,7 @@ public static class ProjectService
             };
             foreach (var c in dto.Clips)
             {
-                track.Clips.Add(new TimelineClip
+                var clip = new TimelineClip
                 {
                     Id = c.Id == Guid.Empty ? Guid.NewGuid() : c.Id,
                     AssetId = c.AssetId,
@@ -178,8 +179,14 @@ public static class ProjectService
                         .Select(e => e!)
                         .ToList(),
                     TransitionIn = CreateTransition(c.TransitionIn),
-                    TransitionOut = CreateTransition(c.TransitionOut)
-                });
+                    TransitionOut = CreateTransition(c.TransitionOut),
+                    Text = CreateText(c.Text)
+                };
+
+                if (clip.Kind == MediaKind.Text && clip.Text == null)
+                    clip.Text = TextCatalog.CreateDefault("Text");
+
+                track.Clips.Add(clip);
             }
             project.Tracks.Add(track);
         }
@@ -240,6 +247,70 @@ public static class ProjectService
         foreach (var pair in dto.Values ?? new Dictionary<string, double>())
             transition.Values[pair.Key] = pair.Value;
         return transition;
+    }
+
+    private static TextDto? CaptureText(TextOverlay? text) => text == null
+        ? null
+        : new TextDto
+        {
+            Text = text.Text,
+            FontFamily = text.FontFamily,
+            FontSize = text.FontSize,
+            Weight = text.Weight,
+            Italic = text.Italic,
+            Color = text.Color,
+            Align = text.Align,
+            Direction = text.Direction,
+            PositionX = text.PositionX,
+            PositionY = text.PositionY,
+            MaxWidth = text.MaxWidth,
+            Shadow = text.Shadow,
+            ShadowBlur = text.ShadowBlur,
+            ShadowOpacity = text.ShadowOpacity,
+            ShadowDepth = text.ShadowDepth,
+            Outline = text.Outline,
+            OutlineThickness = text.OutlineThickness,
+            OutlineColor = text.OutlineColor,
+            Background = text.Background,
+            BackgroundColor = text.BackgroundColor,
+            BackgroundOpacity = text.BackgroundOpacity,
+            BackgroundPadding = text.BackgroundPadding,
+            Animation = text.Animation,
+            AnimationSeconds = text.AnimationSeconds,
+            Preset = text.Preset
+        };
+
+    private static TextOverlay? CreateText(TextDto? dto)
+    {
+        if (dto == null) return null;
+
+        var text = TextCatalog.CreateDefault(dto.Text ?? "Text");
+        text.Text = dto.Text ?? "Text";
+        text.FontFamily = dto.FontFamily ?? text.FontFamily;
+        text.FontSize = Math.Clamp(dto.FontSize, 4, 400);
+        text.Weight = Math.Clamp(dto.Weight, 100, 900);
+        text.Italic = dto.Italic;
+        text.Color = dto.Color ?? text.Color;
+        text.Align = dto.Align;
+        text.Direction = dto.Direction;
+        text.PositionX = Math.Clamp(dto.PositionX, 0, 1);
+        text.PositionY = Math.Clamp(dto.PositionY, 0, 1);
+        text.MaxWidth = Math.Clamp(dto.MaxWidth, 0.05, 1);
+        text.Shadow = dto.Shadow;
+        text.ShadowBlur = Math.Clamp(dto.ShadowBlur, 0, 60);
+        text.ShadowOpacity = Math.Clamp(dto.ShadowOpacity, 0, 1);
+        text.ShadowDepth = Math.Clamp(dto.ShadowDepth, 0, 40);
+        text.Outline = dto.Outline;
+        text.OutlineThickness = Math.Clamp(dto.OutlineThickness, 0, 20);
+        text.OutlineColor = dto.OutlineColor ?? text.OutlineColor;
+        text.Background = dto.Background;
+        text.BackgroundColor = dto.BackgroundColor ?? text.BackgroundColor;
+        text.BackgroundOpacity = Math.Clamp(dto.BackgroundOpacity, 0, 1);
+        text.BackgroundPadding = Math.Clamp(dto.BackgroundPadding, 0, 80);
+        text.Animation = dto.Animation;
+        text.AnimationSeconds = Math.Clamp(dto.AnimationSeconds, 0.05, 5);
+        text.Preset = dto.Preset ?? text.Preset;
+        return text;
     }
 
     /// <param name="relativeTo">
@@ -403,6 +474,37 @@ public sealed class ClipDto
     public List<EffectDto> Effects { get; set; } = new();
     public TransitionDto? TransitionIn { get; set; }
     public TransitionDto? TransitionOut { get; set; }
+    public TextDto? Text { get; set; }
+}
+
+/// <summary>One stored text style. Font size and spacing are for a 1080p frame.</summary>
+public sealed class TextDto
+{
+    public string? Text { get; set; }
+    public string? FontFamily { get; set; }
+    public double FontSize { get; set; } = 64;
+    public int Weight { get; set; } = 600;
+    public bool Italic { get; set; }
+    public string? Color { get; set; } = "#FFFFFF";
+    public TextAlign Align { get; set; } = TextAlign.Center;
+    public TextDirection Direction { get; set; } = TextDirection.Auto;
+    public double PositionX { get; set; } = 0.5;
+    public double PositionY { get; set; } = 0.82;
+    public double MaxWidth { get; set; } = 0.8;
+    public bool Shadow { get; set; } = true;
+    public double ShadowBlur { get; set; } = 8;
+    public double ShadowOpacity { get; set; } = 0.65;
+    public double ShadowDepth { get; set; } = 3;
+    public bool Outline { get; set; }
+    public double OutlineThickness { get; set; } = 2;
+    public string? OutlineColor { get; set; } = "#000000";
+    public bool Background { get; set; }
+    public string? BackgroundColor { get; set; } = "#000000";
+    public double BackgroundOpacity { get; set; } = 0.55;
+    public double BackgroundPadding { get; set; } = 16;
+    public TextAnimation Animation { get; set; } = TextAnimation.Fade;
+    public double AnimationSeconds { get; set; } = 0.35;
+    public string? Preset { get; set; }
 }
 
 /// <summary>One stored effect. Values are keyed so new parameters can be added.</summary>

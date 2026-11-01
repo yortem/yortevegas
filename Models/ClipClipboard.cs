@@ -31,7 +31,8 @@ public static class ClipClipboard
         double PositionY,
         IReadOnlyList<ClipEffect> Effects,
         ClipTransition? TransitionIn,
-        ClipTransition? TransitionOut);
+        ClipTransition? TransitionOut,
+        TextOverlay? Text);
 
     private static List<Snapshot> _items = new();
 
@@ -64,7 +65,8 @@ public static class ClipClipboard
         clip.PositionY,
         clip.Effects.Select(e => e.Clone()).ToList(),
         clip.TransitionIn?.Clone(),
-        clip.TransitionOut?.Clone());
+        clip.TransitionOut?.Clone(),
+        clip.Text?.Clone());
 
     public static void Set(IEnumerable<Snapshot> items) => _items = items.ToList();
 

@@ -57,6 +57,10 @@ public sealed class PreviewLayer
     public int RevealMode { get; init; }
 
     public double RevealFeather { get; init; }
+
+    /// <summary>A text overlay layer is drawn from a pre-rendered transparent bitmap.</summary>
+    public bool IsText { get; init; }
+    public BitmapSource TextImage { get; init; }
 }
 
 /// <summary>
@@ -92,6 +96,7 @@ public sealed class PreviewCompositor : HwndHost
     private int _uUvScale = -1, _uUvOffset = -1;
     private int _uChromaKey = -1, _uKeyColor = -1, _uKeySimilarity = -1, _uKeyBlend = -1;
     private int _uReveal = -1, _uRevealMode = -1, _uRevealFeather = -1, _uSolid = -1;
+    private int _uUseTextureAlpha = -1;
 
     public event EventHandler Failed;
 
@@ -281,6 +286,52 @@ public sealed class PreviewCompositor : HwndHost
         layer.RevealMode = spec.RevealMode;
         layer.RevealFeather = Math.Clamp(spec.RevealFeather, 0, 0.5);
 
+        if (spec.IsText)
+        {
+            if (!layer.IsText)
+            {
+                if (layer.Fbo != 0)
+                {
+                    _glDeleteFramebuffers(1, ref layer.Fbo);
+                    layer.Fbo = 0;
+                }
+                if (layer.Texture != 0)
+                {
+                    glDeleteTextures(1, ref layer.Texture);
+                    layer.Texture = 0;
+                }
+                layer.TextImage = null;
+                layer.TextDirty = false;
+            }
+
+            layer.IsText = true;
+            layer.Loaded = true;
+            layer.Pending = false;
+            layer.PendingSeek = null;
+
+            if (!ReferenceEquals(layer.TextImage, spec.TextImage))
+            {
+                layer.TextImage = spec.TextImage;
+                layer.TextDirty = true;
+            }
+
+            RequestRedraw();
+            return;
+        }
+
+        if (layer.IsText)
+        {
+            if (layer.Texture != 0)
+            {
+                glDeleteTextures(1, ref layer.Texture);
+                layer.Texture = 0;
+            }
+            layer.TextImage = null;
+            layer.TextDirty = false;
+        }
+
+        layer.IsText = false;
+
         if (!string.Equals(layer.Path, spec.Path, StringComparison.OrdinalIgnoreCase))
         {
             layer.Path = spec.Path;
@@ -363,7 +414,7 @@ public sealed class PreviewCompositor : HwndHost
             {
                 if (!layer.Active || !layer.Visual || !layer.Loaded) continue;
                 EnsureTarget(layer);
-                if (layer.Fbo != 0)
+                if (!layer.IsText && layer.Fbo != 0)
                 {
                     layer.Player.RenderTo(layer.Fbo, layer.TargetW, layer.TargetH);
                 }
@@ -445,7 +496,8 @@ public sealed class PreviewCompositor : HwndHost
 
         foreach (var layer in _layers)
         {
-            if (!layer.Active || layer.Pending || !layer.Visual || !layer.Loaded || layer.Fbo == 0) continue;
+            if (!layer.Active || layer.Pending || !layer.Visual || !layer.Loaded) continue;
+            if (layer.IsText ? layer.Texture == 0 : layer.Fbo == 0) continue;
             if (layer.Opacity <= 0.002) continue;
 
             var cropWidth = Math.Max(0.05, 1 - layer.CropLeft - layer.CropRight);
@@ -469,6 +521,7 @@ public sealed class PreviewCompositor : HwndHost
             _glUniform1f(_uAlpha, (float)layer.Opacity);
             _glUniform1i(_uChromaKey, layer.ChromaKey ? 1 : 0);
             _glUniform1i(_uSolid, 0);
+            _glUniform1i(_uUseTextureAlpha, layer.IsText ? 1 : 0);
             _glUniform1i(_uRevealMode, layer.RevealMode);
             _glUniform1f(_uReveal, (float)layer.Reveal);
             _glUniform1f(_uRevealFeather, (float)layer.RevealFeather);
@@ -612,6 +665,13 @@ public sealed class PreviewCompositor : HwndHost
 
     private void EnsureTarget(LayerState layer)
     {
+        if (layer.IsText)
+        {
+            if (layer.Texture != 0 && !layer.TextDirty) return;
+            UploadTextTexture(layer);
+            return;
+        }
+
         if (layer.Fbo != 0 && Math.Abs(layer.TargetAspect - layer.Aspect) < 0.001) return;
 
         if (layer.Fbo != 0)
@@ -649,6 +709,48 @@ public sealed class PreviewCompositor : HwndHost
         _glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
+    private void UploadTextTexture(LayerState layer)
+    {
+        var image = layer.TextImage;
+        if (image == null) return;
+
+        BitmapSource source = image.Format == PixelFormats.Bgra32
+            ? image
+            : new FormatConvertedBitmap(image, PixelFormats.Bgra32, null, 0);
+
+        var width = source.PixelWidth;
+        var height = source.PixelHeight;
+        if (width <= 0 || height <= 0) return;
+
+        var stride = width * 4;
+        var pixels = new byte[stride * height];
+        source.CopyPixels(pixels, stride, 0);
+
+        if (layer.Texture == 0) glGenTextures(1, out layer.Texture);
+        glBindTexture(GL_TEXTURE_2D, layer.Texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        var handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+        try
+        {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                GL_BGRA, GL_UNSIGNED_BYTE, handle.AddrOfPinnedObject());
+        }
+        finally
+        {
+            handle.Free();
+        }
+
+        layer.TargetW = width;
+        layer.TargetH = height;
+        layer.TargetAspect = layer.Aspect;
+        layer.TextDirty = false;
+        RequestRedraw();
+    }
+
     // ------------------------------------------------------------- shaders
 
     private void BuildPipeline()
@@ -681,6 +783,7 @@ uniform float uReveal;
 uniform int uRevealMode;
 uniform float uRevealFeather;
 uniform int uSolid;
+uniform int uUseTextureAlpha;
 void main()
 {
     if (uSolid == 1)
@@ -691,6 +794,10 @@ void main()
 
     vec4 c = texture2D(uTex, vUv);
     float alpha = uAlpha;
+    if (uUseTextureAlpha == 1)
+    {
+        alpha *= c.a;
+    }
     if (uChromaKey == 1)
     {
         float d = length(c.rgb - uKeyColor);
@@ -746,6 +853,7 @@ void main()
         _uRevealMode = _glGetUniformLocation(_program, "uRevealMode");
         _uRevealFeather = _glGetUniformLocation(_program, "uRevealFeather");
         _uSolid = _glGetUniformLocation(_program, "uSolid");
+        _uUseTextureAlpha = _glGetUniformLocation(_program, "uUseTextureAlpha");
 
         var verts = new float[]
         {
@@ -842,6 +950,9 @@ void main()
         public double Reveal = 1;
         public int RevealMode;
         public double RevealFeather;
+        public bool IsText;
+        public BitmapSource TextImage;
+        public bool TextDirty;
 
         public LayerState(PreviewCompositor owner) => _owner = owner;
 

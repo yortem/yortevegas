@@ -55,6 +55,16 @@ crossfades and clip levels, preview the composited cut, and export a simple MP4.
   clip edge instead. Every transition has a duration, direction or soft-edge slider and
   an ON/OFF switch; `✕` removes it. Transitions render in the monitor and the export and
   are saved in the project.
+- **Text** — the `T` button in the left rail opens the text composer. Type a line, pick a
+  preset (**Subtitle**, **Caption**, **Title**, **Intro**, **Credits**, **Lower third**,
+  **Minimal** or **Quote**) and adjust the font, size, weight, italic, colour, alignment,
+  direction, position, shadow, outline, background bar and animation. Text is added on its
+  own layer above the picture with **Add to timeline**, or by dragging a preset onto the
+  timeline. Hebrew is supported: **Direction → Auto** detects Hebrew and switches the
+  input and layout to RTL, or you can force **LTR** / **RTL**; the font list includes
+  Hebrew-capable fonts such as Segoe UI, Arial, Tahoma, David, Gisha, Miriam, FrankRuehl
+  and Narkisim. Animations are Fade, Slide up, Slide left, Zoom and Wipe. Text renders in
+  the monitor and the export and is saved in the project.
 - **Editing aids** — snapping to clip edges and the playhead, frame-accurate stepping,
   zoom (mouse wheel, pointer-anchored; `+` / `-`), horizontal scrolling (`Shift` + wheel),
   vertical scrolling (`Alt` + wheel or the right scrollbar), ruler scrubbing that updates

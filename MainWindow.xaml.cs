@@ -22,12 +22,14 @@ public partial class MainWindow : Window
     private const string AssetDragFormat = "YorteVegas.AssetId";
     private const string EffectDragFormat = EffectsPanel.EffectDragFormat;
     private const string TransitionDragFormat = TransitionsPanel.TransitionDragFormat;
+    private const string TextDragFormat = TextPanel.TextDragFormat;
 
     private enum LeftPanel
     {
         Media,
         Effects,
-        Transitions
+        Transitions,
+        Text
     }
 
     private static readonly Geometry PlayGeometry = Geometry.Parse("M8 5 L19 12 L8 19 Z");
@@ -41,6 +43,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _levelTimer;
     private readonly DispatcherTimer _effectsTimer;
     private readonly DispatcherTimer _transitionTimer;
+    private readonly DispatcherTimer _textTimer;
 
     private readonly AppSettings _settings;
     private readonly TimelinePreview _preview;
@@ -71,9 +74,13 @@ public partial class MainWindow : Window
     private bool _transitionsAttaching;
     private bool _transitionsCaptured;
     private ProjectFile? _transitionsSnapshot;
+    private bool _textAttaching;
+    private bool _textCaptured;
+    private ProjectFile? _textSnapshot;
 
     private bool EffectsVisible => _leftPanel == LeftPanel.Effects;
     private bool TransitionsVisible => _leftPanel == LeftPanel.Transitions;
+    private bool TextVisible => _leftPanel == LeftPanel.Text;
 
     public MainWindow(AppSettings settings, string? startupProject = null,
         IReadOnlyList<string>? startupImports = null)
@@ -134,6 +141,44 @@ public partial class MainWindow : Window
 
             _transitionTimer.Stop();
             _transitionTimer.Start();
+        };
+
+        _textTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(70) };
+        _textTimer.Tick += (_, _) =>
+        {
+            _textTimer.Stop();
+            _project.NotifyTextChanged();
+        };
+
+        TextHost.Changed += (_, _) =>
+        {
+            if (!_textCaptured)
+            {
+                _textCaptured = true;
+                if (_textSnapshot != null) _project.BeginEdit(_textSnapshot);
+            }
+
+            _textTimer.Stop();
+            _textTimer.Start();
+        };
+
+        TextHost.AddRequested += text =>
+        {
+            if (_project == null) return;
+            _project.BeginEdit();
+            var clip = _project.AddTextClip(text, _project.Playhead, 4);
+            AttachText(clip);
+            _textCaptured = true;
+            FlashStatus($"Text added on {_project.TrackOf(clip)?.Name ?? "a text layer"}");
+        };
+
+        TextHost.DeleteRequested += clip =>
+        {
+            if (_project == null) return;
+            _project.BeginEdit();
+            _project.DeleteClip(clip);
+            AttachText(null);
+            _textCaptured = true;
         };
 
         var defaults = new ProjectSettings
@@ -231,6 +276,11 @@ public partial class MainWindow : Window
             var clip = _project.SelectedClip;
             AttachTransitions(clip != null && clip.Kind != MediaKind.Audio ? clip : null);
         }
+        else if (TextVisible)
+        {
+            var clip = _project.SelectedClip;
+            AttachText(clip != null && clip.Kind == MediaKind.Text ? clip : null);
+        }
     }
 
     private void LoadThumbnails()
@@ -315,6 +365,8 @@ public partial class MainWindow : Window
             UpdateEffectsForSelection();
         else if (TransitionsVisible)
             UpdateTransitionsForSelection();
+        else if (TextVisible)
+            UpdateTextForSelection();
     }
 
     /// <summary>Keeps the effects inspector pointed at the selected visual clip.</summary>
@@ -323,7 +375,9 @@ public partial class MainWindow : Window
         if (_effectsAttaching) return;
 
         var clip = _project.SelectedClip;
-        var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+        var target = clip != null && clip.Kind is MediaKind.Video or MediaKind.Image
+            ? clip
+            : null;
         if (ReferenceEquals(target, EffectsHost.EditedClip)) return;
 
         _effectsAttaching = true;
@@ -385,6 +439,41 @@ public partial class MainWindow : Window
         if (!_transitionTimer.IsEnabled) return;
         _transitionTimer.Stop();
         _project.NotifyTransitionChanged();
+    }
+
+    /// <summary>Keeps the text composer pointed at the selected text clip.</summary>
+    private void UpdateTextForSelection()
+    {
+        if (_textAttaching) return;
+
+        var clip = _project.SelectedClip;
+        var target = clip != null && clip.Kind == MediaKind.Text ? clip : null;
+        if (ReferenceEquals(target, TextHost.EditedClip)) return;
+
+        _textAttaching = true;
+        try
+        {
+            FlushText();
+            AttachText(target);
+        }
+        finally
+        {
+            _textAttaching = false;
+        }
+    }
+
+    private void AttachText(TimelineClip? clip)
+    {
+        _textCaptured = false;
+        _textSnapshot = ProjectService.Capture(_project);
+        TextHost.Attach(_project, clip);
+    }
+
+    private void FlushText()
+    {
+        if (!_textTimer.IsEnabled) return;
+        _textTimer.Stop();
+        _project.NotifyTextChanged();
     }
 
     private void UpdateUndoButtons()
@@ -461,6 +550,9 @@ public partial class MainWindow : Window
     private void RailTransitions_Click(object sender, RoutedEventArgs e) =>
         ShowLeftPanel(LeftPanel.Transitions);
 
+    private void RailText_Click(object sender, RoutedEventArgs e) =>
+        ShowLeftPanel(LeftPanel.Text);
+
     /// <summary>
     /// Swaps the media library for the effects or transitions inspector in the
     /// same column, so the monitor stays visible while a clip is adjusted.
@@ -473,6 +565,7 @@ public partial class MainWindow : Window
         RailMedia.IsChecked = panel == LeftPanel.Media;
         RailEffects.IsChecked = panel == LeftPanel.Effects;
         RailTransitions.IsChecked = panel == LeftPanel.Transitions;
+        RailText.IsChecked = panel == LeftPanel.Text;
 
         MediaLibraryPanel.Visibility =
             panel == LeftPanel.Media ? Visibility.Visible : Visibility.Collapsed;
@@ -480,15 +573,20 @@ public partial class MainWindow : Window
             panel == LeftPanel.Effects ? Visibility.Visible : Visibility.Collapsed;
         TransitionsPanelBorder.Visibility =
             panel == LeftPanel.Transitions ? Visibility.Visible : Visibility.Collapsed;
+        TextPanelBorder.Visibility =
+            panel == LeftPanel.Text ? Visibility.Visible : Visibility.Collapsed;
 
         if (previous == LeftPanel.Effects) FlushEffects();
         if (previous == LeftPanel.Transitions) FlushTransitions();
+        if (previous == LeftPanel.Text) FlushText();
 
         if (panel == LeftPanel.Effects)
         {
             _preview.Pause();
             var clip = _project.SelectedClip;
-            var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+            var target = clip != null && clip.Kind is MediaKind.Video or MediaKind.Image
+                ? clip
+                : null;
 
             _effectsAttaching = true;
             try
@@ -514,6 +612,23 @@ public partial class MainWindow : Window
             finally
             {
                 _transitionsAttaching = false;
+            }
+        }
+        else if (panel == LeftPanel.Text)
+        {
+            _preview.Pause();
+            var clip = _project.SelectedClip;
+            var target = clip != null && clip.Kind == MediaKind.Text ? clip : null;
+
+            _textAttaching = true;
+            try
+            {
+                if (!ReferenceEquals(target, TextHost.EditedClip))
+                    AttachText(target);
+            }
+            finally
+            {
+                _textAttaching = false;
             }
         }
         else
@@ -1067,6 +1182,16 @@ public partial class MainWindow : Window
             if (Timeline.ClipAtPoint(point) != null)
                 e.Effects = DragDropEffects.Copy;
         }
+        else if (e.Data.GetDataPresent(TextDragFormat) &&
+                 e.Data.GetData(TextDragFormat) is TextDropData textDrop)
+        {
+            Timeline.ClearTransitionPlaceholder();
+            var label = string.IsNullOrWhiteSpace(textDrop.Text)
+                ? "Text"
+                : textDrop.Text.Split('\n')[0].Trim();
+            Timeline.ShowDropPlaceholder(point, label, MediaKind.Text, 4);
+            e.Effects = DragDropEffects.Copy;
+        }
         else if (e.Data.GetDataPresent(AssetDragFormat) &&
             Guid.TryParse(e.Data.GetData(AssetDragFormat) as string, out var id))
         {
@@ -1118,6 +1243,23 @@ public partial class MainWindow : Window
         var point = e.GetPosition(Timeline);
         Timeline.ClearDropPlaceholder();
         Timeline.ClearTransitionPlaceholder();
+
+        if (e.Data.GetDataPresent(TextDragFormat) &&
+            e.Data.GetData(TextDragFormat) is TextDropData textDrop)
+        {
+            e.Handled = true;
+            var at = Timeline.DropTimeAtPoint(point);
+            var track = Timeline.FindDropTrack(point, MediaKind.Text);
+
+            _project.BeginEdit();
+            var style = TextCatalog.Create(textDrop.Preset, textDrop.Text);
+            var clip = _project.AddTextClip(style, at, 4, track);
+            ShowLeftPanel(LeftPanel.Text);
+            TextHost.Attach(_project, clip);
+            _textCaptured = true;
+            FlashStatus($"Text added at {at:0.0} s");
+            return;
+        }
 
         if (e.Data.GetDataPresent(TransitionDragFormat) &&
             e.Data.GetData(TransitionDragFormat) is TransitionDropData transitionDrop)

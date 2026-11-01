@@ -223,7 +223,8 @@ public sealed class EditProject : ObservableObject
 
     /// <summary>True when the clipboard holds clips whose media still exists here.</summary>
     public bool CanPasteClips =>
-        ClipClipboard.HasClips && ClipClipboard.Items.Any(i => FindAsset(i.AssetId) != null);
+        ClipClipboard.HasClips && ClipClipboard.Items.Any(i =>
+            i.Kind == MediaKind.Text || FindAsset(i.AssetId) != null);
 
     /// <summary>Copies the selection into the in-app clip clipboard.</summary>
     public int CopySelectedClips()
@@ -250,7 +251,7 @@ public sealed class EditProject : ObservableObject
 
         foreach (var item in items)
         {
-            if (FindAsset(item.AssetId) == null) continue;
+            if (item.Kind != MediaKind.Text && FindAsset(item.AssetId) == null) continue;
 
             var track = Tracks.FirstOrDefault(t =>
                     t.Id == item.TrackId && !t.IsLocked && t.Accepts(item.Kind))
@@ -282,7 +283,8 @@ public sealed class EditProject : ObservableObject
                 PositionY = item.PositionY,
                 Effects = item.Effects.Select(e => e.Clone()).ToList(),
                 TransitionIn = item.TransitionIn?.Clone(),
-                TransitionOut = item.TransitionOut?.Clone()
+                TransitionOut = item.TransitionOut?.Clone(),
+                Text = item.Text?.Clone()
             };
             track.Clips.Add(clip);
             pasted.Add(clip);
@@ -478,6 +480,57 @@ public sealed class EditProject : ObservableObject
         return clip;
     }
 
+    /// <summary>
+    /// Adds a text event at a project time. Text always gets its own free video
+    /// layer (a new top layer when every existing one is busy), so it overlays
+    /// the picture instead of becoming an accidental crossfade.
+    /// </summary>
+    public TimelineClip AddTextClip(TextOverlay text, double start, double duration = 4,
+        TimelineTrack? preferredTrack = null)
+    {
+        start = SnapToFrame(Math.Max(0, start));
+        duration = Math.Max(FrameDuration, SnapToFrame(duration));
+        var end = start + duration;
+
+        static bool Occupied(TimelineTrack track, double from, double to) =>
+            track.Clips.Any(c => from < c.EndSeconds - Epsilon && to > c.StartSeconds + Epsilon);
+
+        var track = preferredTrack;
+        if (track == null || track.Kind != TrackKind.Video || track.IsLocked ||
+            Occupied(track, start, end))
+        {
+            track = Tracks.FirstOrDefault(t =>
+                t.Kind == TrackKind.Video && !t.IsLocked && !Occupied(t, start, end));
+        }
+
+        if (track == null)
+        {
+            int number = 1;
+            while (Tracks.Any(t => t.Name == $"Text {number}")) number++;
+            track = new TimelineTrack { Name = $"Text {number}", Kind = TrackKind.Video };
+            Tracks.Insert(0, track);
+        }
+
+        var clip = new TimelineClip
+        {
+            AssetId = Guid.Empty,
+            Name = text.DisplayName,
+            Kind = MediaKind.Text,
+            StartSeconds = start,
+            DurationSeconds = duration,
+            InSeconds = 0,
+            Text = text
+        };
+
+        track.Clips.Add(clip);
+        SelectedClipId = clip.Id;
+        NotifyTimelineChanged();
+        return clip;
+    }
+
+    /// <summary>Marks the project dirty after a live text edit.</summary>
+    public void NotifyTextChanged() => NotifyTimelineChanged();
+
     public TimelineClip? GetClipAt(double seconds, TrackKind kind)
     {
         var soloed = kind == TrackKind.Audio && Tracks.Any(t => t.Kind == TrackKind.Audio && t.IsSolo);
@@ -524,6 +577,18 @@ public sealed class EditProject : ObservableObject
         if (source.IsLocked || target.IsLocked) return false;
         if (!target.Accepts(clip.Kind)) return false;
 
+        // Text and picture may share a layer only at different times; an
+        // overlap would turn the text into a crossfade instead of an overlay.
+        if (clip.Kind == MediaKind.Text)
+        {
+            if (target.Clips.Any(c => c.Kind != MediaKind.Text && Overlaps(c, clip)))
+                return false;
+        }
+        else if (target.Clips.Any(c => c.Kind == MediaKind.Text && Overlaps(c, clip)))
+        {
+            return false;
+        }
+
         source.Clips.Remove(clip);
         target.Clips.Add(clip);
         SelectedClipId = clip.Id;
@@ -531,10 +596,28 @@ public sealed class EditProject : ObservableObject
         return true;
     }
 
+    private static bool Overlaps(TimelineClip left, TimelineClip right) =>
+        left.StartSeconds < right.EndSeconds - Epsilon &&
+        left.EndSeconds > right.StartSeconds + Epsilon;
+
     public void TrimClipLeft(TimelineClip clip, double desiredStart)
     {
         var track = TrackOf(clip);
         if (track == null || track.IsLocked) return;
+
+        if (clip.Kind == MediaKind.Text)
+        {
+            // Text has no source in-point; moving the left edge just changes
+            // how long the text event lasts.
+            var textMinStart = 0.0;
+            var textMaxStart = clip.EndSeconds - FrameDuration;
+            var textStart = SnapToFrame(Math.Clamp(desiredStart, textMinStart,
+                Math.Max(textMinStart, textMaxStart)));
+            var textDelta = textStart - clip.StartSeconds;
+            clip.StartSeconds = textStart;
+            clip.DurationSeconds = Math.Max(FrameDuration, clip.DurationSeconds - textDelta);
+            return;
+        }
 
         var rate = Math.Max(0.1, clip.PlaybackRate);
         // Limits come from the source media only; neighbours may be overlapped.
@@ -604,7 +687,8 @@ public sealed class EditProject : ObservableObject
             PositionX = clip.PositionX,
             PositionY = clip.PositionY,
             Effects = clip.Effects.Select(e => e.Clone()).ToList(),
-            TransitionOut = clip.TransitionOut?.Clone()
+            TransitionOut = clip.TransitionOut?.Clone(),
+            Text = clip.Text?.Clone()
         };
 
         clip.DurationSeconds = splitAt - clip.StartSeconds;
@@ -651,6 +735,8 @@ public sealed class EditProject : ObservableObject
     /// </summary>
     private double SourceInAfterSplit(TimelineClip clip, double splitAt)
     {
+        if (clip.Kind == MediaKind.Text) return 0;
+
         var rate = Math.Max(0.1, clip.PlaybackRate);
         var rawOffset = (splitAt - clip.StartSeconds) * rate;
         var asset = FindAsset(clip.AssetId);
@@ -693,7 +779,8 @@ public sealed class EditProject : ObservableObject
             PositionY = clip.PositionY,
             Effects = clip.Effects.Select(e => e.Clone()).ToList(),
             TransitionIn = clip.TransitionIn?.Clone(),
-            TransitionOut = clip.TransitionOut?.Clone()
+            TransitionOut = clip.TransitionOut?.Clone(),
+            Text = clip.Text?.Clone()
         };
         track.Clips.Add(copy);
         SelectedClipId = copy.Id;

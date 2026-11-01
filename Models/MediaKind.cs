@@ -5,7 +5,8 @@ public enum MediaKind
 {
     Video,
     Audio,
-    Image
+    Image,
+    Text
 }
 
 public static class MediaKindExtensions
@@ -16,6 +17,7 @@ public static class MediaKindExtensions
     {
         MediaKind.Video => "Video",
         MediaKind.Audio => "Audio",
+        MediaKind.Text => "Text",
         _ => "Image"
     };
 }

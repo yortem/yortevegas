@@ -189,6 +189,11 @@ public sealed class TimelineClip : ObservableObject
 
     public bool HasTransitions => TransitionIn != null || TransitionOut != null;
 
+    /// <summary>The text style for a <see cref="MediaKind.Text"/> clip.</summary>
+    public TextOverlay? Text { get; set; }
+
+    public bool IsText => Kind == MediaKind.Text && Text != null;
+
     /// <summary>Manual fade-in at the start of the clip, in project seconds.</summary>
     public double FadeInSeconds
     {

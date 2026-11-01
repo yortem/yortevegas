@@ -60,6 +60,16 @@ public static class EffectThumbnailService
         return (Width, Height, (byte[])pixels.Clone());
     }
 
+    /// <summary>The built-in sample as a frozen bitmap (used by text previews).</summary>
+    public static BitmapSource GetSampleBitmap()
+    {
+        var (width, height, pixels) = GetSamplePixels();
+        var bitmap = BitmapSource.Create(width, height, 96, 96,
+            PixelFormats.Bgra32, null, pixels, width * 4);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
     private static string BuildKey(EffectKind kind,
         IReadOnlyDictionary<string, double> values)
     {

@@ -555,6 +555,7 @@ public sealed class TimelinePreview
         {
             foreach (var clip in track.Clips)
             {
+                if (clip.Kind == MediaKind.Text) continue;
                 if (active.Any(s => s.Key == clip.Id)) continue;
                 if (clip.StartSeconds <= time + 0.05) continue;
                 if (next == null || clip.StartSeconds < next.StartSeconds) next = clip;
@@ -597,6 +598,12 @@ public sealed class TimelinePreview
     private void AddLayer(List<PreviewLayer> specs, TimelineClip clip, double time,
         double alpha, double gain, bool visual, LayerTransition transition)
     {
+        if (clip.Kind == MediaKind.Text && clip.Text != null)
+        {
+            AddTextLayer(specs, clip, time, alpha, transition);
+            return;
+        }
+
         var asset = _project.FindAsset(clip.AssetId);
         if (asset == null || asset.IsMissing || !File.Exists(asset.FilePath)) return;
         if (specs.Any(s => s.Key == clip.Id)) return;
@@ -669,6 +676,110 @@ public sealed class TimelinePreview
             RevealMode = transition.RevealMode,
             RevealFeather = transition.Feather
         });
+    }
+
+    private readonly record struct TextAnimationState(
+        double Alpha, double OffsetX, double OffsetY, double Scale,
+        double Reveal, int RevealMode, double Feather)
+    {
+        public static readonly TextAnimationState None = new(1, 0, 0, 1, 1, 0, 0);
+    }
+
+    private void AddTextLayer(List<PreviewLayer> specs, TimelineClip clip, double time,
+        double alpha, LayerTransition transition)
+    {
+        if (specs.Any(s => s.Key == clip.Id)) return;
+
+        var text = clip.Text;
+        if (text == null) return;
+
+        var aspect = _project.Height > 0
+            ? (double)_project.Width / _project.Height
+            : 16.0 / 9.0;
+        int width;
+        int height;
+        if (aspect >= 1)
+        {
+            width = 1280;
+            height = Math.Max(64, (int)Math.Round(width / aspect));
+        }
+        else
+        {
+            height = 1280;
+            width = Math.Max(64, (int)Math.Round(height * aspect));
+        }
+
+        var image = TextOverlayRenderer.Render(text, width, height);
+        var animation = TextAnimationFor(clip, time);
+        var manualFade = ManualFadeFactor(clip, time);
+        var opacity = Math.Clamp(alpha * transition.AlphaMul * animation.Alpha * manualFade, 0, 1);
+
+        var reveal = animation.Reveal;
+        var revealMode = animation.RevealMode;
+        var feather = animation.Feather;
+        if (transition.RevealMode != 0)
+        {
+            reveal = transition.Reveal;
+            revealMode = transition.RevealMode;
+            feather = transition.Feather;
+        }
+
+        specs.Add(new PreviewLayer
+        {
+            Key = clip.Id,
+            Path = "",
+            SourceSeconds = 0,
+            SeekToken = 0,
+            Volume = 0,
+            Opacity = opacity,
+            Rate = 1,
+            LoopA = -1,
+            LoopB = -1,
+            HasVisual = true,
+            Aspect = aspect,
+            Still = true,
+            CropLeft = 0,
+            CropRight = 0,
+            CropTop = 0,
+            CropBottom = 0,
+            PanX = 0,
+            PanY = 0,
+            Scale = Math.Clamp(clip.Scale * transition.ScaleMul * animation.Scale, 0.05, 4),
+            PositionX = Math.Clamp(clip.PositionX + transition.OffsetX + animation.OffsetX, -1, 1),
+            PositionY = Math.Clamp(clip.PositionY + transition.OffsetY + animation.OffsetY, -1, 1),
+            Filters = "",
+            Reveal = reveal,
+            RevealMode = revealMode,
+            RevealFeather = feather,
+            IsText = true,
+            TextImage = image
+        });
+    }
+
+    private static TextAnimationState TextAnimationFor(TimelineClip clip, double time)
+    {
+        var text = clip.Text;
+        if (text == null || text.Animation == TextAnimation.None)
+            return TextAnimationState.None;
+
+        var duration = Math.Max(0.05, text.AnimationSeconds);
+        var inProgress = Math.Clamp((time - clip.StartSeconds) / duration, 0, 1);
+        var outProgress = Math.Clamp((clip.EndSeconds - time) / duration, 0, 1);
+        var progress = TransitionCatalog.Ease(Math.Min(inProgress, outProgress));
+
+        return text.Animation switch
+        {
+            TextAnimation.Fade => new TextAnimationState(progress, 0, 0, 1, 1, 0, 0),
+            TextAnimation.SlideUp => new TextAnimationState(progress, 0,
+                (1 - progress) * 0.08, 1, 1, 0, 0),
+            TextAnimation.SlideLeft => new TextAnimationState(progress,
+                (1 - progress) * 0.08, 0, 1, 1, 0, 0),
+            TextAnimation.Zoom => new TextAnimationState(progress, 0, 0,
+                0.85 + 0.15 * progress, 1, 0, 0),
+            TextAnimation.Wipe => new TextAnimationState(1, 0, 0, 1,
+                progress, 1, 0.05),
+            _ => TextAnimationState.None
+        };
     }
 
     private static bool IsLooped(TimelineClip clip, MediaAsset asset)

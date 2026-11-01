@@ -36,11 +36,13 @@ public sealed class TimelineView : FrameworkElement
     private static readonly Brush VideoClipBrush = Frozen("#1C2B3C");
     private static readonly Brush ImageClipBrush = Frozen("#242E45");
     private static readonly Brush AudioClipBrush = Frozen("#1E3A52");
+    private static readonly Brush TextClipBrush = Frozen("#2B2340");
     private static readonly Brush ClipBorderBrush = Frozen("#3C5773");
     private static readonly Brush HoverBorderBrush = Frozen("#5E8CBC");
     private static readonly Brush VideoStripeBrush = Frozen("#2E9BFF");
     private static readonly Brush ImageStripeBrush = Frozen("#9A5CFF");
     private static readonly Brush AudioStripeBrush = Frozen("#4E9BD6");
+    private static readonly Brush TextStripeBrush = Frozen("#C7A9FF");
     private static readonly Brush WaveBrush = FrozenArgb(115, 160, 205, 235);
     private static readonly Brush VideoWaveBrush = FrozenArgb(140, 150, 205, 240);
     private static readonly Brush ScrollTrackBrush = Frozen("#0D131D");
@@ -293,7 +295,8 @@ public sealed class TimelineView : FrameworkElement
         if (_project == null || point.X < HeaderWidth) return null;
         if (!TryGetTrackRow(point.Y, out var track, out _) || track == null) return null;
         if (track.Kind != TrackKind.Video || track.IsLocked) return null;
-        return ClipAt(track, point);
+        var clip = ClipAt(track, point);
+        return clip != null && clip.Kind != MediaKind.Text ? clip : null;
     }
 
     /// <summary>
@@ -891,6 +894,7 @@ public sealed class TimelineView : FrameworkElement
         {
             MediaKind.Audio => AudioClipBrush,
             MediaKind.Image => ImageClipBrush,
+            MediaKind.Text => TextClipBrush,
             _ => VideoClipBrush
         };
 
@@ -926,6 +930,7 @@ public sealed class TimelineView : FrameworkElement
         {
             MediaKind.Audio => AudioStripeBrush,
             MediaKind.Image => ImageStripeBrush,
+            MediaKind.Text => TextStripeBrush,
             _ => VideoStripeBrush
         };        dc.PushClip(new RectangleGeometry(new Rect(rect.X, rect.Y, Math.Min(3.5, rect.Width), rect.Height)));
         dc.DrawRectangle(stripe, null, new Rect(rect.X, rect.Y, 3.5, rect.Height));
@@ -1158,7 +1163,7 @@ public sealed class TimelineView : FrameworkElement
     private static bool TryGetCropIconRect(TimelineClip clip, Rect rect, out Rect icon)
     {
         icon = default;
-        if (clip.Kind == MediaKind.Audio) return false;
+        if (clip.Kind is MediaKind.Audio or MediaKind.Text) return false;
         if (rect.Width < 46 || rect.Height < 22) return false;
 
         icon = new Rect(rect.Right - 18, rect.Y + 6, 14, 14);
@@ -2777,10 +2782,12 @@ public sealed class TimelineView : FrameworkElement
         menu.Items.Add(copyClip);
         menu.Items.Add(pasteClip);
         menu.Items.Add(new Separator());
-        menu.Items.Add(copyStyle);
-        menu.Items.Add(pasteStyle);
-        if (clip.Kind != MediaKind.Audio)
+        if (clip.Kind is MediaKind.Video or MediaKind.Image)
+        {
+            menu.Items.Add(copyStyle);
+            menu.Items.Add(pasteStyle);
             menu.Items.Add(crop);
+        }
         menu.Items.Add(new Separator());
         menu.Items.Add(fadeIn);
         menu.Items.Add(fadeOut);
@@ -2789,7 +2796,8 @@ public sealed class TimelineView : FrameworkElement
             menu.Items.Add(transitionIn);
             menu.Items.Add(transitionOut);
         }
-        menu.Items.Add(mute);
+        if (clip.Kind != MediaKind.Audio && clip.Kind != MediaKind.Text)
+            menu.Items.Add(mute);
         menu.Items.Add(new Separator());
         menu.Items.Add(delete);
         menu.Items.Add(deleteClose);

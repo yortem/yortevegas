@@ -73,6 +73,9 @@ public static class ExportService
         public double OutTransitionStart;
         public double OutTransitionDuration;
         public bool OutTransitionOverlap;
+        public bool IsText;
+        public TextAnimation TextAnimation;
+        public double TextAnimationSeconds;
     }
 
     private sealed record FlashRegion(double Start, double Duration, double Strength);
@@ -182,14 +185,22 @@ public static class ExportService
             throw new InvalidOperationException("The export range is empty.");
 
         var total = rangeEnd - rangeStart;
-        var clips = CollectClips(project, rangeStart, rangeEnd, out var flashRegions);
+        var textDirectory = Path.Combine(Path.GetTempPath(), "YorteVegas",
+            "text-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(textDirectory);
+
+        var clips = CollectClips(project, rangeStart, rangeEnd, textDirectory,
+            out var flashRegions);
         if (!clips.Any(c => c.Visual))
+        {
+            try { Directory.Delete(textDirectory, true); } catch { }
             throw new InvalidOperationException("There are no video clips to render.");
+        }
 
         var arguments = new List<string> { "-y" };
         foreach (var clip in clips)
         {
-            if (clip.Clip.Kind == MediaKind.Image)
+            if (clip.Clip.Kind is MediaKind.Image or MediaKind.Text)
             {
                 arguments.AddRange(new[] { "-loop", "1", "-i", clip.Asset.FilePath });
             }
@@ -248,13 +259,22 @@ public static class ExportService
             outputPath
         });
 
-        await RunFfmpegAsync(ffmpegPath, arguments, total, progress, cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await RunFfmpegAsync(ffmpegPath, arguments, total, progress, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            try { Directory.Delete(textDirectory, true); } catch { }
+            TextOverlayRenderer.ClearCache();
+        }
         progress?.Report(new ExportProgress("Finished", 1, totalTime, totalTime));
     }
 
     private static List<ClipInput> CollectClips(EditProject project,
-        double rangeStart, double rangeEnd, out List<FlashRegion> flashRegions)
+        double rangeStart, double rangeEnd, string textDirectory,
+        out List<FlashRegion> flashRegions)
     {
         var clips = new List<ClipInput>();
         var anySolo = project.Tracks.Any(t => t.IsSolo);
@@ -266,6 +286,52 @@ public static class ExportService
 
             foreach (var clip in track.Clips.OrderBy(c => c.StartSeconds))
             {
+                if (clip.Kind == MediaKind.Text)
+                {
+                    if (clip.Text == null || string.IsNullOrWhiteSpace(clip.Text.Text)) continue;
+                    if (clip.DurationSeconds <= 0.001) continue;
+
+                    var textPath = Path.Combine(textDirectory, $"text_{clip.Id:N}.png");
+                    var textImage = TextOverlayRenderer.Render(clip.Text,
+                        project.Width, project.Height);
+                    TextOverlayRenderer.SavePng(textImage, textPath);
+
+                    clips.Add(new ClipInput
+                    {
+                        Clip = clip,
+                        Asset = new MediaAsset
+                        {
+                            Id = Guid.Empty,
+                            Name = clip.Name,
+                            FilePath = textPath,
+                            Kind = MediaKind.Text,
+                            DurationSeconds = clip.DurationSeconds,
+                            Width = project.Width,
+                            Height = project.Height,
+                            HasAudio = false
+                        },
+                        Track = track,
+                        Visual = true,
+                        HasAudio = false,
+                        Volume = 0,
+                        Opacity = Math.Clamp(clip.Opacity, 0, 1),
+                        ManualIn = clip.FadeInSeconds,
+                        ManualOut = clip.FadeOutSeconds,
+                        Scale = 1,
+                        PositionX = 0,
+                        PositionY = 0,
+                        Start = clip.StartSeconds,
+                        Duration = clip.DurationSeconds,
+                        SourceIn = 0,
+                        Rate = 1,
+                        Effects = new List<ClipEffect>(),
+                        IsText = true,
+                        TextAnimation = clip.Text.Animation,
+                        TextAnimationSeconds = clip.Text.AnimationSeconds
+                    });
+                    continue;
+                }
+
                 var asset = project.FindAsset(clip.AssetId);
                 if (asset == null || asset.IsMissing || asset.DurationSeconds <= 0.01) continue;
                 if (clip.DurationSeconds <= 0.001) continue;
@@ -596,7 +662,7 @@ public static class ExportService
                 filters.Clear();
             }
 
-            if (clip.Clip.Kind == MediaKind.Image)
+            if (clip.Clip.Kind is MediaKind.Image or MediaKind.Text)
             {
                 filters.Add($"fps={fps}");
             }
@@ -693,6 +759,16 @@ public static class ExportService
                     filters.Add("fade=t=out:st=" + F(flashStart) +
                                 ":d=" + F(flashLength) + ":alpha=1");
                 }
+            }
+
+            if (clip.IsText &&
+                clip.TextAnimation is not (TextAnimation.None or TextAnimation.Wipe) &&
+                clip.TextAnimationSeconds > 0.01)
+            {
+                var animation = Math.Min(clip.TextAnimationSeconds, clip.Duration * 0.5);
+                filters.Add("fade=t=in:st=0:d=" + F(animation) + ":alpha=1");
+                filters.Add("fade=t=out:st=" + F(Math.Max(0, clip.Duration - animation)) +
+                            ":d=" + F(animation) + ":alpha=1");
             }
 
             if (clip.ManualIn > 0.01)
@@ -883,6 +959,18 @@ public static class ExportService
                 clip.OutTransitionDuration, false, list.Count));
         }
 
+        if (clip.IsText && clip.TextAnimation == TextAnimation.Wipe &&
+            clip.TextAnimationSeconds > 0.01)
+        {
+            var animation = Math.Min(clip.TextAnimationSeconds, clip.Duration * 0.5);
+            var wipe = new ClipTransition { Kind = TransitionKind.Wipe };
+            wipe.Set("direction", 1);
+            wipe.Set("feather", 0.05);
+            list.Add(new RevealTransition(wipe, 0, animation, true, list.Count));
+            list.Add(new RevealTransition(wipe, clip.Duration - animation,
+                animation, false, list.Count));
+        }
+
         return list;
     }
 
@@ -1021,6 +1109,31 @@ public static class ExportService
 
         Add(clip.InTransition, clip.InTransitionStart, clip.InTransitionDuration, false);
         Add(clip.OutTransition, clip.OutTransitionStart, clip.OutTransitionDuration, true);
+
+        if (clip.IsText &&
+            clip.TextAnimation is TextAnimation.SlideUp or TextAnimation.SlideLeft &&
+            clip.TextAnimationSeconds > 0.01)
+        {
+            var animation = Math.Min(clip.TextAnimationSeconds, clip.Duration * 0.5);
+            var start = F(clip.Start);
+            var end = F(clip.Start + clip.Duration);
+            var inProgress = $"clip((t-{start})/{F(animation)},0,1)";
+            var outProgress = $"clip(({end}-t)/{F(animation)},0,1)";
+            var progress = $"min({inProgress},{outProgress})";
+            var eased = $"({progress}*{progress}*(3-2*{progress}))";
+
+            if (clip.TextAnimation == TextAnimation.SlideUp)
+            {
+                var term = $"if(between(t,{start},{end}),((1-{eased})*0.08)*{preset.Height},0)";
+                y = $"({y}+{term})";
+            }
+            else
+            {
+                var term = $"if(between(t,{start},{end}),((1-{eased})*0.08)*{preset.Width},0)";
+                x = $"({x}+{term})";
+            }
+        }
+
         return (x, y);
     }
 

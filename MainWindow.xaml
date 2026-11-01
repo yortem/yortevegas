@@ -403,6 +403,12 @@
               <TextBlock Text="&#x21C4;" FontFamily="Segoe UI" FontSize="15"
                          VerticalAlignment="Center"/>
             </ToggleButton>
+            <ToggleButton x:Name="RailText" Style="{StaticResource RailButton}"
+                          AutomationProperties.Name="Text"
+                          Click="RailText_Click" ToolTip="Text overlays and titles">
+              <TextBlock Text="T" FontFamily="Segoe UI" FontSize="16" FontWeight="Bold"
+                         VerticalAlignment="Center"/>
+            </ToggleButton>
           </StackPanel>
 
           <Button Grid.Row="2" Style="{StaticResource GhostButton}" Width="38" Height="38" Padding="0"
@@ -521,6 +527,13 @@
                   BorderBrush="#141E2A" BorderThickness="0,0,1,0"
                   Visibility="Collapsed">
             <controls:TransitionsPanel x:Name="TransitionsHost"/>
+          </Border>
+
+          <!-- text composer (same slot as the media library) -->
+          <Border x:Name="TextPanelBorder" Grid.Column="0" Background="#0D131D"
+                  BorderBrush="#141E2A" BorderThickness="0,0,1,0"
+                  Visibility="Collapsed">
+            <controls:TextPanel x:Name="TextHost"/>
           </Border>
 
           <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="#090A0C"
