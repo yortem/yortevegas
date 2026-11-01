@@ -983,17 +983,23 @@ public sealed class TimelineView : FrameworkElement
         var hasFrame = (clip.Kind == MediaKind.Video && asset?.Filmstrip.Count > 0) ||
                        (clip.Kind == MediaKind.Image && asset?.Thumbnail != null);
 
-        if (hasFrame && labelWidth > 8 && rect.Height > 16)
+        var label = missing ? $"{clip.Name}  (missing)" : clip.Name;
+        var showLabel = !string.IsNullOrEmpty(clip.Name) && labelWidth > 8 && rect.Height > 16;
+        if (showLabel)
         {
-            dc.DrawRoundedRectangle(LabelBackdropBrush, null,
-                new Rect(rect.X + 4, rect.Y + 2,
-                    Math.Min(rect.Width - 6, labelWidth + 14), 15), 3, 3);
-        }
+            var measured = new FormattedText(label, CultureInfo.CurrentCulture,
+                FlowDirection.LeftToRight, SemiBoldTypeface, 10.2, textBrush,
+                VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var textWidth = Math.Min(labelWidth, measured.WidthIncludingTrailingWhitespace);
 
-        if (!string.IsNullOrEmpty(clip.Name) && labelWidth > 8 && rect.Height > 16)
-        {
-            var label = missing ? $"{clip.Name}  (missing)" : clip.Name;
-            DrawText(dc, label, rect.X + 10, labelY, 10.2, textBrush, SemiBoldTypeface, labelWidth);
+            if (hasFrame)
+            {
+                dc.DrawRoundedRectangle(LabelBackdropBrush, null,
+                    new Rect(rect.X + 4, rect.Y + 2, textWidth + 12, 15), 3, 3);
+            }
+
+            DrawText(dc, label, rect.X + 10, labelY, 10.2, textBrush,
+                SemiBoldTypeface, labelWidth);
         }
 
         if (speedBadge)
