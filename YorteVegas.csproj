@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\AppIcon.png" />
+    <Resource Include="Assets\sample2.png" />
     <None Include="tools\ffmpeg.exe" Condition="Exists('tools\ffmpeg.exe')"
           CopyToOutputDirectory="PreserveNewest" Link="ffmpeg.exe" />
   </ItemGroup>

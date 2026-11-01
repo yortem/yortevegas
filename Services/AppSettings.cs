@@ -23,6 +23,9 @@ public sealed class AppSettings
     /// <summary>Optional path to ffmpeg.exe used for export. Empty = auto-detect.</summary>
     public string FFmpegPath { get; set; } = "";
 
+    /// <summary>Folder of the last export, used as the default destination.</summary>
+    public string LastExportDirectory { get; set; } = "";
+
     public double? WindowLeft { get; set; }
     public double? WindowTop { get; set; }
     public double? WindowWidth { get; set; }

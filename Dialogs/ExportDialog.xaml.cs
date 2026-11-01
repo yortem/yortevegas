@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using Microsoft.Win32;
@@ -38,8 +39,28 @@ public partial class ExportDialog : Window
         LightTagline.Text = light.Tagline;
         LightDescription.Text = light.Description;
 
-        OutputBox.Text = ExportService.DefaultOutputPath(project);
+        var defaultOutput = ExportService.DefaultOutputPath(project);
+        if (!string.IsNullOrWhiteSpace(settings.LastExportDirectory) &&
+            Directory.Exists(settings.LastExportDirectory))
+        {
+            defaultOutput = Path.Combine(settings.LastExportDirectory,
+                Path.GetFileName(defaultOutput));
+        }
+        OutputBox.Text = defaultOutput;
         GoodCard.IsChecked = true;
+
+        if (project.HasRange)
+        {
+            var rangeStart = project.RangeStart!.Value;
+            var rangeEnd = project.RangeEnd!.Value;
+            RangeText.Text =
+                $"Exports the selected range: {Timecode.Short(rangeStart)} – " +
+                $"{Timecode.Short(rangeEnd)} ({Timecode.Short(rangeEnd - rangeStart)}).";
+        }
+        else
+        {
+            RangeText.Text = "Exports the whole timeline.";
+        }
 
         Closing += ExportDialog_Closing;
         Loaded += (_, _) => ExportButton.Focus();
@@ -98,7 +119,18 @@ public partial class ExportDialog : Window
         ProgressPanel.Visibility = Visibility.Visible;
         ProgressText.Text = "Preparing export…";
 
-        var progress = new Progress<ExportProgress>(value => ProgressText.Text = value.Stage);
+        var progress = new Progress<ExportProgress>(value =>
+        {
+            if (value.Stage.StartsWith("Preparing", StringComparison.Ordinal))
+            {
+                ProgressText.Text = value.Stage;
+                return;
+            }
+
+            ProgressBar.Value = Math.Clamp(value.Fraction, 0, 1);
+            ProgressText.Text = $"{value.Stage}  {value.Fraction * 100:0}%  ·  " +
+                                $"{Clock(value.Elapsed)} / {Clock(value.Total)}";
+        });
 
         try
         {
@@ -107,12 +139,19 @@ public partial class ExportDialog : Window
 
             Exported = true;
             ExportedPath = outputPath;
+            _settings.LastExportDirectory = Path.GetDirectoryName(outputPath) ?? "";
+            _settings.Save();
+            ProgressBar.Value = 1;
             ProgressText.Text = $"Saved to {outputPath}";
             ExportButton.Content = "Done";
             CancelButton.Content = "Close";
             ExportButton.IsEnabled = true;
             SetBusy(false);
             SetBusyFinal();
+
+            // Allow Close() from the completion prompt.
+            _exporting = false;
+            PromptOpenFolder(outputPath);
         }
         catch (OperationCanceledException)
         {
@@ -196,6 +235,36 @@ public partial class ExportDialog : Window
         CancelButton.Content = "Close";
         ExportButton.Content = "Done";
     }
+
+    private void PromptOpenFolder(string path)
+    {
+        var result = MessageDialog.Show(this, "Export finished",
+            $"Saved to\n{path}\n\nOpen the containing folder?",
+            "Open folder", "Close", null);
+
+        if (result == MessageResult.Primary) OpenContainingFolder(path);
+        Close();
+    }
+
+    private static void OpenContainingFolder(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // Explorer is best-effort; a failure must not undo a good export.
+        }
+    }
+
+    private static string Clock(TimeSpan time) =>
+        time.TotalHours >= 1
+            ? $"{(int)time.TotalHours}:{time.Minutes:00}:{time.Seconds:00}"
+            : $"{time.Minutes:00}:{time.Seconds:00}";
 
     private void ShowError(string message)
     {

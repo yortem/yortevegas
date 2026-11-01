@@ -36,6 +36,8 @@ public sealed class TimelinePreview
     private bool _globalSeek = true;
     private bool _seekQueued;
     private DateTime _seekDue;
+    private double? _previewTime;
+    private (double Start, double End)? _loopRange;
     private string _lastError = "";
 
     public TimelinePreview(PreviewCompositor compositor, EditProject project)
@@ -75,6 +77,8 @@ public sealed class TimelinePreview
         Pause();
         _tokens.Clear();
         _lastActive.Clear();
+        _previewTime = null;
+        _loopRange = null;
         _globalSeek = true;
         ApplyNow();
     }
@@ -90,12 +94,41 @@ public sealed class TimelinePreview
         if (_updatingPlayhead) return;
 
         if (_isPlaying) Pause();
+        _previewTime = null;
         _globalSeek = true;
+        QueueSeek();
+    }
 
-        // Dragging the playhead fires this on every mouse move. Seeking every
-        // layer on each event stalls the UI, so coalesce scrubs into ~18 fps.
+    /// <summary>
+    /// Shows a time in the monitor without moving the playhead. Used while
+    /// trimming so the edge frame is visible during the drag.
+    /// </summary>
+    public void PreviewAt(double seconds)
+    {
+        if (_isPlaying) Pause();
+        _previewTime = Math.Max(0, seconds);
+        _globalSeek = true;
+        QueueSeek();
+    }
+
+    /// <summary>Returns the monitor to the playhead after a trim preview.</summary>
+    public void ClearPreviewTime()
+    {
+        if (_previewTime == null) return;
+        _previewTime = null;
+        Refresh();
+    }
+
+    private void QueueSeek()
+    {
+        // Seeking every layer on each mouse move stalls the UI, so throttle to
+        // ~25 fps. Only the first move of a burst schedules the seek: pushing
+        // the due time back on every move would starve the preview until the
+        // drag ends.
+        if (_seekQueued) return;
+
         _seekQueued = true;
-        _seekDue = DateTime.UtcNow.AddMilliseconds(55);
+        _seekDue = DateTime.UtcNow.AddMilliseconds(35);
     }
 
     public void Play()
@@ -104,7 +137,21 @@ public sealed class TimelinePreview
         if (_project.ContentDuration <= 0) return;
 
         var time = _project.Playhead;
-        if (time >= _project.ContentDuration - 1e-6) time = 0;
+        _loopRange = null;
+
+        if (_project.HasRange &&
+            _project.RangeStart is { } rangeStart && _project.RangeEnd is { } rangeEnd)
+        {
+            // Starting at/after the range restarts it; starting inside loops it.
+            if (time >= rangeEnd - 1e-6) time = rangeStart;
+            if (time >= rangeStart - 1e-6 && time < rangeEnd - 1e-6)
+                _loopRange = (rangeStart, rangeEnd);
+        }
+        else if (time >= _project.ContentDuration - 1e-6)
+        {
+            time = 0;
+        }
+
         SetPlayhead(time);
         if (_project.GetPreviewClipAt(time) == null &&
             _project.FindNextPreviewClip(time) == null) return;
@@ -122,6 +169,7 @@ public sealed class TimelinePreview
     {
         var wasPlaying = _isPlaying;
         _isPlaying = false;
+        _loopRange = null;
         _compositor.SetPlaying(false);
         if (wasPlaying) PlayStateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -164,11 +212,27 @@ public sealed class TimelinePreview
 
     public void RefreshClipVolume() => ApplyNow();
 
+    /// <summary>Re-applies the effect stacks after a live parameter edit.</summary>
+    public void RefreshClipEffects() => ApplyNow();
+
     private void OnTick()
     {
         if (_isPlaying)
         {
             var time = _anchorProject + (DateTime.UtcNow - _anchorWall).TotalSeconds;
+
+            if (_loopRange is { } loop && time >= loop.End)
+            {
+                var length = Math.Max(0.001, loop.End - loop.Start);
+                time = loop.Start + (time - loop.End) % length;
+                _anchorProject = time;
+                _anchorWall = DateTime.UtcNow;
+                _globalSeek = true;
+                SetPlayhead(time);
+                ApplyNow();
+                return;
+            }
+
             if (time >= _project.ContentDuration)
             {
                 SetPlayhead(_project.ContentDuration);
@@ -193,7 +257,7 @@ public sealed class TimelinePreview
 
         var time = _isPlaying
             ? _anchorProject + (DateTime.UtcNow - _anchorWall).TotalSeconds
-            : _project.Playhead;
+            : _previewTime ?? _project.Playhead;
 
         AudioLevel = 0;
         var specs = BuildLayers(time);
@@ -360,6 +424,7 @@ public sealed class TimelinePreview
                 ? (double)asset.Width / asset.Height
                 : 16.0 / 9.0,
             Still = next.Kind == MediaKind.Image,
+            Filters = EffectCatalog.PreviewStack(next.Effects),
             Pending = true
         };
     }
@@ -398,6 +463,11 @@ public sealed class TimelinePreview
             : 16.0 / 9.0;
         var aspect = sourceAspect;
 
+        var chroma = clip.Effects.FirstOrDefault(e =>
+            e.Enabled && e.Kind == EffectKind.ChromaKey);
+        var keyBlue = chroma != null &&
+                      (int)Math.Round(chroma.Get("color", 0)) == 1;
+
         specs.Add(new PreviewLayer
         {
             Key = clip.Id,
@@ -417,7 +487,17 @@ public sealed class TimelinePreview
             CropTop = clip.CropTop,
             CropBottom = clip.CropBottom,
             PanX = clip.PanX,
-            PanY = clip.PanY
+            PanY = clip.PanY,
+            Scale = clip.Scale,
+            PositionX = clip.PositionX,
+            PositionY = clip.PositionY,
+            Filters = EffectCatalog.PreviewStack(clip.Effects),
+            ChromaKey = chroma != null,
+            KeyRed = 0,
+            KeyGreen = keyBlue ? 0 : 1,
+            KeyBlue = keyBlue ? 1 : 0,
+            KeySimilarity = chroma?.Get("similarity", 0.12) ?? 0,
+            KeyBlend = chroma?.Get("blend", 0.15) ?? 0
         });
     }
 
@@ -462,6 +542,7 @@ public sealed class TimelinePreview
 
     private void SetPlayhead(double seconds)
     {
+        _previewTime = null;
         _updatingPlayhead = true;
         try { _project.Playhead = seconds; }
         finally { _updatingPlayhead = false; }

@@ -26,7 +26,12 @@ public sealed record ExportPreset(
     string AudioBitrate,
     string X264Preset);
 
-public sealed record ExportProgress(string Stage, int Completed, int Total);
+/// <summary>
+/// One FFmpeg progress block. <paramref name="Fraction"/> is 0..1 of the
+/// timeline duration; the times are what FFmpeg has written and the total.
+/// </summary>
+public sealed record ExportProgress(
+    string Stage, double Fraction, TimeSpan Elapsed, TimeSpan Total);
 
 /// <summary>
 /// Renders the timeline as the compositor shows it: every video track stacked
@@ -53,10 +58,13 @@ public static class ExportService
         public double ManualOut;       // per-clip fade-out
         public double CropLeft, CropRight, CropTop, CropBottom;
         public double PanX, PanY;
+        public double Scale = 1;
+        public double PositionX, PositionY;
         public double Start;
         public double Duration;
         public double SourceIn;
         public double Rate = 1;
+        public List<ClipEffect> Effects = new();
     }
 
     public static ExportPreset CreatePreset(EditProject project, ExportQuality quality)
@@ -152,9 +160,16 @@ public static class ExportService
             throw new InvalidOperationException("There is nothing on the timeline to export.");
 
         var preset = CreatePreset(project, quality);
-        var total = project.ContentDuration;
 
-        var clips = CollectClips(project);
+        var rangeStart = project.HasRange ? Math.Max(0, project.RangeStart!.Value) : 0;
+        var rangeEnd = project.HasRange
+            ? Math.Min(project.ContentDuration, project.RangeEnd!.Value)
+            : project.ContentDuration;
+        if (rangeEnd - rangeStart < 0.05)
+            throw new InvalidOperationException("The export range is empty.");
+
+        var total = rangeEnd - rangeStart;
+        var clips = CollectClips(project, rangeStart, rangeEnd);
         if (!clips.Any(c => c.Visual))
             throw new InvalidOperationException("There are no video clips to render.");
 
@@ -183,7 +198,8 @@ public static class ExportService
         }
 
         var graph = BuildGraph(clips, preset, total, silenceIndex);
-        progress?.Report(new ExportProgress("Rendering…", 0, 1));
+        var totalTime = TimeSpan.FromSeconds(total);
+        progress?.Report(new ExportProgress("Preparing…", 0, TimeSpan.Zero, totalTime));
 
         var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
         if (!string.IsNullOrWhiteSpace(outputDirectory))
@@ -214,14 +230,18 @@ public static class ExportService
             "-ar", "48000",
             "-ac", "2",
             "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            "-nostats",
             outputPath
         });
 
-        await RunFfmpegAsync(ffmpegPath, arguments, cancellationToken).ConfigureAwait(false);
-        progress?.Report(new ExportProgress("Finished", 1, 1));
+        await RunFfmpegAsync(ffmpegPath, arguments, total, progress, cancellationToken)
+            .ConfigureAwait(false);
+        progress?.Report(new ExportProgress("Finished", 1, totalTime, totalTime));
     }
 
-    private static List<ClipInput> CollectClips(EditProject project)
+    private static List<ClipInput> CollectClips(EditProject project,
+        double rangeStart, double rangeEnd)
     {
         var clips = new List<ClipInput>();
         var anySolo = project.Tracks.Any(t => t.IsSolo);
@@ -254,10 +274,14 @@ public static class ExportService
                     CropBottom = clip.CropBottom,
                     PanX = clip.PanX,
                     PanY = clip.PanY,
+                    Scale = clip.Scale,
+                    PositionX = clip.PositionX,
+                    PositionY = clip.PositionY,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
-                    Rate = Math.Max(0.1, clip.PlaybackRate)
+                    Rate = Math.Max(0.1, clip.PlaybackRate),
+                    Effects = clip.Effects.Where(e => e.Enabled).Select(e => e.Clone()).ToList()
                 };
                 clips.Add(input);
             }
@@ -291,6 +315,9 @@ public static class ExportService
                     CropBottom = clip.CropBottom,
                     PanX = clip.PanX,
                     PanY = clip.PanY,
+                    Scale = clip.Scale,
+                    PositionX = clip.PositionX,
+                    PositionY = clip.PositionY,
                     Start = clip.StartSeconds,
                     Duration = clip.DurationSeconds,
                     SourceIn = clip.InSeconds,
@@ -301,9 +328,54 @@ public static class ExportService
         }
 
         ApplyOverlaps(project, clips);
+        ClipToRange(clips, rangeStart, rangeEnd);
 
         for (var i = 0; i < clips.Count; i++) clips[i].InputIndex = i;
         return clips;
+    }
+
+    /// <summary>
+    /// Keeps only the part of each clip inside the export range and rebases its
+    /// start to zero, so the filter graph renders just the selected segment.
+    /// </summary>
+    private static void ClipToRange(List<ClipInput> clips, double rangeStart, double rangeEnd)
+    {
+        foreach (var clip in clips)
+        {
+            var clipEnd = clip.Start + clip.Duration;
+            var visibleStart = Math.Max(clip.Start, rangeStart);
+            var visibleEnd = Math.Min(clipEnd, rangeEnd);
+            if (visibleEnd - visibleStart <= 0.001)
+            {
+                clip.Duration = 0;
+                continue;
+            }
+
+            var skipped = visibleStart - clip.Start;
+            if (skipped > 0.001)
+            {
+                clip.SourceIn += skipped * clip.Rate;
+                clip.ManualIn = Math.Max(0, clip.ManualIn - skipped);
+                clip.FadeIn = Math.Max(0, clip.FadeIn - skipped);
+                if (clip.FadeOutAt >= 0) clip.FadeOutAt = Math.Max(0, clip.FadeOutAt - skipped);
+            }
+
+            clip.Start = visibleStart - rangeStart;
+            clip.Duration = visibleEnd - visibleStart;
+            clip.ManualOut = Math.Min(clip.ManualOut, clip.Duration);
+
+            if (clip.FadeOutAt >= clip.Duration)
+            {
+                clip.FadeOutAt = -1;
+                clip.FadeOut = 0;
+            }
+            else if (clip.FadeOutAt >= 0)
+            {
+                clip.FadeOut = Math.Min(clip.FadeOut, clip.Duration - clip.FadeOutAt);
+            }
+        }
+
+        clips.RemoveAll(c => c.Duration <= 0.001);
     }
 
     private static void ApplyOverlaps(EditProject project, List<ClipInput> clips)
@@ -355,57 +427,99 @@ public static class ExportService
             var start = clip.Start.ToString("0.######", CultureInfo.InvariantCulture);
             var end = (clip.Start + clip.Duration).ToString("0.######", CultureInfo.InvariantCulture);
             var opacity = clip.Opacity.ToString("0.###", CultureInfo.InvariantCulture);
+            var place = Placement(clip, preset);
+            var contentW = place.Width.ToString(CultureInfo.InvariantCulture);
+            var contentH = place.Height.ToString(CultureInfo.InvariantCulture);
+            var placeX = place.X.ToString(CultureInfo.InvariantCulture);
+            var placeY = place.Y.ToString(CultureInfo.InvariantCulture);
 
-            string video;
+            var filters = new List<string>();
+            var chainLabel = $"[{clip.InputIndex}:v]";
+
+            void Emit(string outputLabel)
+            {
+                if (filters.Count == 0) return;
+                parts.Add($"{chainLabel}{string.Join(",", filters)}{outputLabel}");
+                chainLabel = outputLabel;
+                filters.Clear();
+            }
+
             if (clip.Clip.Kind == MediaKind.Image)
             {
-                video = $"[{clip.InputIndex}:v]fps={fps}," +
-                        BuildCropFilter(clip) +
-                        $"scale={width}:{height}:force_original_aspect_ratio=decrease," +
-                        $"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1," +
-                        $"format=rgba,colorchannelmixer=aa={opacity}";
+                filters.Add($"fps={fps}");
             }
             else
             {
                 var sourceIn = clip.SourceIn.ToString("0.######", CultureInfo.InvariantCulture);
                 var sourceDuration = (clip.Duration * clip.Rate + 0.1)
                     .ToString("0.######", CultureInfo.InvariantCulture);
-                video = $"[{clip.InputIndex}:v]trim=start={sourceIn}:duration={sourceDuration}," +
-                        $"setpts=(PTS-STARTPTS)/{rate},fps={fps}," +
-                        BuildCropFilter(clip) +
-                        $"scale={width}:{height}:force_original_aspect_ratio=decrease," +
-                        $"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1," +
-                        $"format=rgba,colorchannelmixer=aa={opacity}";
+                filters.Add($"trim=start={sourceIn}:duration={sourceDuration}");
+                filters.Add($"setpts=(PTS-STARTPTS)/{rate}");
+                filters.Add($"fps={fps}");
             }
+
+            var crop = BuildCropFilter(clip);
+            if (crop.Length > 0) filters.Add(crop.TrimEnd(','));
+
+            // Clip effects, in the same order the monitor applies them.
+            var effectStage = 0;
+            foreach (var effect in clip.Effects)
+            {
+                if (effect.Kind == EffectKind.Glow)
+                {
+                    if (effect.Get("intensity", 0.55) < 0.01) continue;
+
+                    filters.Add("format=gbrp");
+                    Emit($"[xe{i}_{effectStage++}]");
+                    var prefix = $"gl{i}_{effectStage++}";
+                    var (blur, blend) = EffectCatalog.GlowParts(effect, prefix);
+                    parts.Add($"{chainLabel}split=2[{prefix}a][{prefix}b]");
+                    parts.Add(blur);
+                    var glowOut = $"[xe{i}_{effectStage++}]";
+                    parts.Add(blend + glowOut);
+                    chainLabel = glowOut;
+                }
+                else
+                {
+                    var filter = EffectCatalog.SimpleFilter(effect);
+                    if (filter.Length > 0) filters.Add(filter);
+                }
+            }
+
+            filters.Add($"scale={contentW}:{contentH}:force_original_aspect_ratio=decrease");
+            filters.Add("setsar=1");
+            filters.Add("format=rgba");
+            filters.Add($"colorchannelmixer=aa={opacity}");
 
             if (clip.FadeIn > 0.01)
             {
-                video += ",fade=t=in:st=0:d=" +
-                         clip.FadeIn.ToString("0.######", CultureInfo.InvariantCulture) +
-                         ":alpha=1";
+                filters.Add("fade=t=in:st=0:d=" +
+                            clip.FadeIn.ToString("0.######", CultureInfo.InvariantCulture) +
+                            ":alpha=1");
             }
 
             if (clip.ManualIn > 0.01)
             {
-                video += ",fade=t=in:st=0:d=" +
-                         clip.ManualIn.ToString("0.######", CultureInfo.InvariantCulture) +
-                         ":alpha=1";
+                filters.Add("fade=t=in:st=0:d=" +
+                            clip.ManualIn.ToString("0.######", CultureInfo.InvariantCulture) +
+                            ":alpha=1");
             }
 
             if (clip.ManualOut > 0.01)
             {
                 var fadeStart = Math.Max(0, clip.Duration - clip.ManualOut);
-                video += ",fade=t=out:st=" +
-                         fadeStart.ToString("0.######", CultureInfo.InvariantCulture) +
-                         ":d=" + clip.ManualOut.ToString("0.######", CultureInfo.InvariantCulture) +
-                         ":alpha=1";
+                filters.Add("fade=t=out:st=" +
+                            fadeStart.ToString("0.######", CultureInfo.InvariantCulture) +
+                            ":d=" + clip.ManualOut.ToString("0.######", CultureInfo.InvariantCulture) +
+                            ":alpha=1");
             }
 
-            video += $",setpts=PTS+{start}/TB[v{i}]";
-            parts.Add(video);
+            filters.Add($"setpts=PTS+{start}/TB");
+            Emit($"[v{i}]");
 
             var nextBase = $"b{i + 1}";
-            parts.Add($"[{baseLabel}][v{i}]overlay=eof_action=pass:repeatlast=0:" +
+            parts.Add($"[{baseLabel}][v{i}]overlay=x={placeX}:y={placeY}:" +
+                      $"eof_action=pass:repeatlast=0:" +
                       $"enable='between(t,{start},{end})'[{nextBase}]");
             baseLabel = nextBase;
         }
@@ -482,6 +596,44 @@ public static class ExportService
         return string.Join(";", parts);
     }
 
+    /// <summary>
+    /// Pixel size and top-left position of the clip on the project frame,
+    /// mirroring the preview: fit the cropped aspect, then scale and offset.
+    /// </summary>
+    private static (int Width, int Height, int X, int Y) Placement(
+        ClipInput clip, ExportPreset preset)
+    {
+        var sourceAspect = clip.Asset.Width > 0 && clip.Asset.Height > 0
+            ? (double)clip.Asset.Width / clip.Asset.Height
+            : 16.0 / 9.0;
+        var cropWidth = Math.Max(0.05, 1 - clip.CropLeft - clip.CropRight);
+        var cropHeight = Math.Max(0.05, 1 - clip.CropTop - clip.CropBottom);
+        var aspect = sourceAspect * cropWidth / cropHeight;
+
+        double fitWidth;
+        double fitHeight;
+        if ((double)preset.Width / preset.Height > aspect)
+        {
+            fitHeight = preset.Height;
+            fitWidth = fitHeight * aspect;
+        }
+        else
+        {
+            fitWidth = preset.Width;
+            fitHeight = fitWidth / aspect;
+        }
+
+        var scale = Math.Clamp(clip.Scale, 0.05, 4);
+        var width = Math.Max(2, (int)Math.Round(fitWidth * scale));
+        var height = Math.Max(2, (int)Math.Round(fitHeight * scale));
+        var centerX = preset.Width / 2.0 + clip.PositionX * preset.Width;
+        var centerY = preset.Height / 2.0 + clip.PositionY * preset.Height;
+
+        return (width, height,
+            (int)Math.Round(centerX - width / 2.0),
+            (int)Math.Round(centerY - height / 2.0));
+    }
+
     private static string BuildCropFilter(ClipInput clip)
     {
         var width = 1 - clip.CropLeft - clip.CropRight;
@@ -498,20 +650,27 @@ public static class ExportService
     }
 
     private static async Task RunFfmpegAsync(
-        string ffmpegPath, IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        string ffmpegPath,
+        IReadOnlyList<string> arguments,
+        double totalSeconds,
+        IProgress<ExportProgress>? progress,
+        CancellationToken cancellationToken)
     {
         var startInfo = new ProcessStartInfo
         {
             FileName = ffmpegPath,
             UseShellExecute = false,
             CreateNoWindow = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            RedirectStandardOutput = true
         };
         foreach (var argument in arguments)
             startInfo.ArgumentList.Add(argument);
 
         using var process = new Process { StartInfo = startInfo };
         var stderr = new StringBuilder();
+        var pendingSeconds = 0.0;
+        var pendingSpeed = "";
 
         process.ErrorDataReceived += (_, e) =>
         {
@@ -522,12 +681,46 @@ public static class ExportService
             }
         };
 
+        // -progress pipe:1 emits one key=value block per stats period; the
+        // block ends with progress=continue/end, which is when we report.
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data == null) return;
+
+            if (e.Data.StartsWith("out_time_us=", StringComparison.Ordinal))
+            {
+                if (long.TryParse(e.Data.AsSpan("out_time_us=".Length),
+                        NumberStyles.Integer, CultureInfo.InvariantCulture, out var microseconds))
+                {
+                    pendingSeconds = microseconds / 1_000_000.0;
+                }
+            }
+            else if (e.Data.StartsWith("speed=", StringComparison.Ordinal))
+            {
+                var speed = e.Data["speed=".Length..].Trim();
+                pendingSpeed = speed is "N/A" or "" ? "" : speed;
+            }
+            else if (e.Data.StartsWith("progress=", StringComparison.Ordinal))
+            {
+                var fraction = totalSeconds > 0.01
+                    ? Math.Clamp(pendingSeconds / totalSeconds, 0, 1)
+                    : 0;
+                var stage = pendingSpeed.Length > 0
+                    ? $"Rendering…  {pendingSpeed}"
+                    : "Rendering…";
+                progress?.Report(new ExportProgress(stage, fraction,
+                    TimeSpan.FromSeconds(pendingSeconds),
+                    TimeSpan.FromSeconds(totalSeconds)));
+            }
+        };
+
         try
         {
             if (!process.Start())
                 throw new InvalidOperationException("Could not start FFmpeg.");
 
             process.BeginErrorReadLine();
+            process.BeginOutputReadLine();
             await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)

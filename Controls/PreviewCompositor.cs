@@ -35,6 +35,20 @@ public sealed class PreviewLayer
     public double CropBottom { get; init; }
     public double PanX { get; init; }
     public double PanY { get; init; }
+    public double Scale { get; init; } = 1;
+    public double PositionX { get; init; }
+    public double PositionY { get; init; }
+
+    /// <summary>mpv <c>vf</c> chain for the clip's effect stack (empty = none).</summary>
+    public string Filters { get; init; } = "";
+
+    /// <summary>Chroma key is applied in the compositor shader, not in mpv.</summary>
+    public bool ChromaKey { get; init; }
+    public double KeyRed { get; init; }
+    public double KeyGreen { get; init; }
+    public double KeyBlue { get; init; }
+    public double KeySimilarity { get; init; }
+    public double KeyBlend { get; init; }
 }
 
 /// <summary>
@@ -68,6 +82,7 @@ public sealed class PreviewCompositor : HwndHost
     private uint _vao;
     private int _uScale = -1, _uOffset = -1, _uTex = -1, _uAlpha = -1;
     private int _uUvScale = -1, _uUvOffset = -1;
+    private int _uChromaKey = -1, _uKeyColor = -1, _uKeySimilarity = -1, _uKeyBlend = -1;
 
     public event EventHandler Failed;
 
@@ -241,6 +256,15 @@ public sealed class PreviewCompositor : HwndHost
         layer.CropBottom = Math.Clamp(spec.CropBottom, 0, 0.45);
         layer.PanX = Math.Clamp(spec.PanX, -1, 1);
         layer.PanY = Math.Clamp(spec.PanY, -1, 1);
+        layer.Scale = Math.Clamp(spec.Scale, 0.05, 4);
+        layer.PositionX = Math.Clamp(spec.PositionX, -1, 1);
+        layer.PositionY = Math.Clamp(spec.PositionY, -1, 1);
+        layer.ChromaKey = spec.ChromaKey;
+        layer.KeyRed = spec.KeyRed;
+        layer.KeyGreen = spec.KeyGreen;
+        layer.KeyBlue = spec.KeyBlue;
+        layer.KeySimilarity = spec.KeySimilarity;
+        layer.KeyBlend = spec.KeyBlend;
 
         if (!string.Equals(layer.Path, spec.Path, StringComparison.OrdinalIgnoreCase))
         {
@@ -284,6 +308,13 @@ public sealed class PreviewCompositor : HwndHost
         {
             layer.CachedVisual = spec.HasVisual;
             layer.Player.SetVideoEnabled(spec.HasVisual);
+        }
+
+        var filters = spec.Filters ?? "";
+        if (!string.Equals(layer.CachedFilters, filters, StringComparison.Ordinal))
+        {
+            layer.CachedFilters = filters;
+            layer.Player.SetFilters(filters);
         }
 
         if (wasPending && !spec.Pending && layer.Loaded && _playing)
@@ -406,15 +437,29 @@ public sealed class PreviewCompositor : HwndHost
             var cropHeight = Math.Max(0.05, 1 - layer.CropTop - layer.CropBottom);
             var croppedAspect = (layer.Aspect <= 0.01 ? 16.0 / 9.0 : layer.Aspect) *
                                 cropWidth / cropHeight;
-            var rect = FitInside(frame, croppedAspect);
-            var scaleX = (float)((double)rect.Width / _pixelW);
-            var scaleY = (float)((double)rect.Height / _pixelH);
-            var offsetX = (float)((rect.X + rect.Width / 2.0) / _pixelW * 2 - 1);
-            var offsetY = (float)(1 - (rect.Y + rect.Height / 2.0) / _pixelH * 2);
+            var fitted = FitInside(frame, croppedAspect);
+            var placement = Math.Clamp(layer.Scale, 0.05, 4);
+            var placedWidth = fitted.Width * placement;
+            var placedHeight = fitted.Height * placement;
+            var centerX = fitted.X + fitted.Width / 2.0 + layer.PositionX * frame.Width;
+            var centerY = fitted.Y + fitted.Height / 2.0 + layer.PositionY * frame.Height;
+
+            var scaleX = (float)(placedWidth / _pixelW);
+            var scaleY = (float)(placedHeight / _pixelH);
+            var offsetX = (float)(centerX / _pixelW * 2 - 1);
+            var offsetY = (float)(1 - centerY / _pixelH * 2);
 
             _glUniform2f(_uScale, scaleX, scaleY);
             _glUniform2f(_uOffset, offsetX, offsetY);
             _glUniform1f(_uAlpha, (float)layer.Opacity);
+            _glUniform1i(_uChromaKey, layer.ChromaKey ? 1 : 0);
+            if (layer.ChromaKey)
+            {
+                _glUniform3f(_uKeyColor, (float)layer.KeyRed,
+                    (float)layer.KeyGreen, (float)layer.KeyBlue);
+                _glUniform1f(_uKeySimilarity, (float)layer.KeySimilarity);
+                _glUniform1f(_uKeyBlend, (float)layer.KeyBlend);
+            }
 
             var uvX = Math.Clamp(layer.CropLeft + layer.PanX, 0, 1 - cropWidth);
             var uvY = Math.Clamp(layer.CropTop + layer.PanY, 0, 1 - cropHeight);
@@ -586,7 +631,23 @@ void main()
 varying vec2 vUv;
 uniform sampler2D uTex;
 uniform float uAlpha;
-void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha); }";
+uniform int uChromaKey;
+uniform vec3 uKeyColor;
+uniform float uKeySimilarity;
+uniform float uKeyBlend;
+void main()
+{
+    vec4 c = texture2D(uTex, vUv);
+    float alpha = uAlpha;
+    if (uChromaKey == 1)
+    {
+        float d = length(c.rgb - uKeyColor);
+        float inner = uKeySimilarity * 1.6;
+        float outer = inner + uKeyBlend * 1.2 + 0.004;
+        alpha *= smoothstep(inner, outer, d);
+    }
+    gl_FragColor = vec4(c.rgb, alpha);
+}";
 
         var vertex = Compile(GL_VERTEX_SHADER, vs);
         var fragment = Compile(GL_FRAGMENT_SHADER, fs);
@@ -603,6 +664,10 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         _uAlpha = _glGetUniformLocation(_program, "uAlpha");
         _uUvScale = _glGetUniformLocation(_program, "uUvScale");
         _uUvOffset = _glGetUniformLocation(_program, "uUvOffset");
+        _uChromaKey = _glGetUniformLocation(_program, "uChromaKey");
+        _uKeyColor = _glGetUniformLocation(_program, "uKeyColor");
+        _uKeySimilarity = _glGetUniformLocation(_program, "uKeySimilarity");
+        _uKeyBlend = _glGetUniformLocation(_program, "uKeyBlend");
 
         var verts = new float[]
         {
@@ -684,11 +749,18 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         public double CropBottom;
         public double PanX;
         public double PanY;
+        public double Scale = 1;
+        public double PositionX;
+        public double PositionY;
         public double CachedRate = -1;
         public double CachedLoopA = -2;
         public double CachedLoopB = -2;
         public double CachedVolume = -1;
         public bool CachedVisual = true;
+        public string CachedFilters = "\u0000";
+        public bool ChromaKey;
+        public double KeyRed, KeyGreen, KeyBlue;
+        public double KeySimilarity, KeyBlend;
 
         public LayerState(PreviewCompositor owner) => _owner = owner;
 
@@ -737,6 +809,7 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
     private delegate void Uniform1iFn(int loc, int value);
     private delegate void Uniform1fFn(int loc, float value);
     private delegate void Uniform2fFn(int loc, float x, float y);
+    private delegate void Uniform3fFn(int loc, float x, float y, float z);
     private delegate void BindVertexArrayFn(uint vao);
     private delegate void BindBufferFn(uint target, uint buffer);
     private delegate void BufferDataFn(uint target, int size, IntPtr data, uint usage);
@@ -764,6 +837,7 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
     private Uniform1iFn _glUniform1i;
     private Uniform1fFn _glUniform1f;
     private Uniform2fFn _glUniform2f;
+    private Uniform3fFn _glUniform3f;
     private BindVertexArrayFn _glBindVertexArray;
     private BindBufferFn _glBindBuffer;
     private BufferDataFn _glBufferData;
@@ -793,6 +867,7 @@ void main() { vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb, uAlpha);
         _glUniform1i = Gl<Uniform1iFn>("glUniform1i");
         _glUniform1f = Gl<Uniform1fFn>("glUniform1f");
         _glUniform2f = Gl<Uniform2fFn>("glUniform2f");
+        _glUniform3f = Gl<Uniform3fFn>("glUniform3f");
         _glGenVertexArrays = Gl<GenFn>("glGenVertexArrays");
         _glBindVertexArray = Gl<BindVertexArrayFn>("glBindVertexArray");
         _glDeleteVertexArrays = Gl<DeleteFn>("glDeleteVertexArrays");
@@ -1027,6 +1102,23 @@ internal sealed class MpvPlayer : IDisposable
         SetProperty("volume", Math.Clamp(volume, 0, 150).ToString("0.###", CultureInfo.InvariantCulture));
 
     public void SetVideoEnabled(bool enabled) => SetProperty("vid", enabled ? "auto" : "no");
+
+    /// <summary>Replaces the clip's video filter chain (mpv <c>vf</c>).</summary>
+    public void SetFilters(string filters)
+    {
+        if (!_initialized || _mpv == IntPtr.Zero) return;
+
+        var value = string.IsNullOrWhiteSpace(filters) ? "" : filters;
+        try
+        {
+            var error = mpv_set_property_string(_mpv, "vf", value);
+            if (error < 0) PreviewCompositor.Log($"vf rejected ({error}): {value}");
+        }
+        catch (Exception ex)
+        {
+            PreviewCompositor.Log("vf failed: " + ex.Message);
+        }
+    }
 
     public void SetRate(double rate) =>
         SetProperty("speed", Math.Clamp(rate, 0.1, 10).ToString("0.###", CultureInfo.InvariantCulture));

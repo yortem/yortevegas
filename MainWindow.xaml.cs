@@ -20,6 +20,7 @@ namespace YorteVegas;
 public partial class MainWindow : Window
 {
     private const string AssetDragFormat = "YorteVegas.AssetId";
+    private const string EffectDragFormat = EffectsPanel.EffectDragFormat;
 
     private static readonly Geometry PlayGeometry = Geometry.Parse("M8 5 L19 12 L8 19 Z");
     private static readonly Geometry PauseGeometry = Geometry.Parse("M7 5 H11 V19 H7 Z M14 5 H18 V19 H14 Z");
@@ -30,10 +31,13 @@ public partial class MainWindow : Window
     private static readonly Brush LevelWarnBrush = Freeze("#F2B23A");
     private static readonly Brush LevelPeakBrush = Freeze("#F87171");
     private readonly DispatcherTimer _levelTimer;
+    private readonly DispatcherTimer _effectsTimer;
 
     private readonly AppSettings _settings;
     private readonly TimelinePreview _preview;
     private readonly DispatcherTimer _statusTimer;
+    private readonly DispatcherTimer _autosaveTimer;
+    private DateTime _lastMissingCheck = DateTime.MinValue;
     private readonly string? _startupProject;
     private readonly IReadOnlyList<string>? _startupImports;
 
@@ -45,7 +49,16 @@ public partial class MainWindow : Window
     private bool _rememberMaximized;
     private MediaKind? _filter;
     private Point _assetDragStart;
+    private MediaAsset? _assetDragItem;
+    private bool _libraryDirty = true;
+    private Guid? _nudgeClipId;
+    private DateTime _nudgeStamp;
+    private bool _nudging;
     private readonly HashSet<Guid> _filmstripLoading = new();
+    private bool _effectsVisible;
+    private bool _effectsAttaching;
+    private bool _effectsCaptured;
+    private ProjectFile? _effectsSnapshot;
 
     public MainWindow(AppSettings settings, string? startupProject = null,
         IReadOnlyList<string>? startupImports = null)
@@ -64,6 +77,29 @@ public partial class MainWindow : Window
         {
             _statusTimer.Stop();
             SetStatus("Ready", ReadyDotBrush);
+        };
+
+        _autosaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+        _autosaveTimer.Tick += (_, _) => AutosaveNow();
+        _autosaveTimer.Start();
+
+        _effectsTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(70) };
+        _effectsTimer.Tick += (_, _) =>
+        {
+            _effectsTimer.Stop();
+            _project.NotifyEffectChanged();
+        };
+
+        EffectsHost.Changed += (_, _) =>
+        {
+            if (!_effectsCaptured)
+            {
+                _effectsCaptured = true;
+                if (_effectsSnapshot != null) _project.BeginEdit(_effectsSnapshot);
+            }
+
+            _effectsTimer.Stop();
+            _effectsTimer.Start();
         };
 
         var defaults = new ProjectSettings
@@ -90,6 +126,7 @@ public partial class MainWindow : Window
         {
             if (Keyboard.FocusedElement is not TextBoxBase)
                 Timeline.Focus();
+            RefreshMissingMedia();
         };
 
         _preview.SetBaseVolume(Math.Clamp(settings.PreviewVolume, 0, 100));
@@ -100,6 +137,8 @@ public partial class MainWindow : Window
         Timeline.RenameTrackRequested += Timeline_RenameTrackRequested;
         Timeline.ClipLevelChanged += (_, _) => _preview.RefreshClipVolume();
         Timeline.CropPanRequested += CropPanClip;
+        Timeline.TrimPreviewRequested += (_, time) => _preview.PreviewAt(time);
+        Timeline.TrimPreviewCleared += (_, _) => _preview.ClearPreviewTime();
 
         AttachProject(project);
         SetDirty(false);
@@ -111,11 +150,16 @@ public partial class MainWindow : Window
 
     private void AttachProject(EditProject project)
     {
+        _effectsTimer.Stop();
+        _effectsSnapshot = null;
+        _effectsCaptured = false;
+
         if (_project != null)
         {
             _project.TimelineChanged -= Project_TimelineChanged;
             _project.SelectionChanged -= Project_SelectionChanged;
             _project.PlayheadChanged -= Project_PlayheadChanged;
+            _project.RangeChanged -= Project_RangeChanged;
             _project.UndoStateChanged -= Project_UndoStateChanged;
             _project.PropertyChanged -= Project_PropertyChanged;
         }
@@ -124,6 +168,7 @@ public partial class MainWindow : Window
         _project.TimelineChanged += Project_TimelineChanged;
         _project.SelectionChanged += Project_SelectionChanged;
         _project.PlayheadChanged += Project_PlayheadChanged;
+        _project.RangeChanged += Project_RangeChanged;
         _project.UndoStateChanged += Project_UndoStateChanged;
         _project.PropertyChanged += Project_PropertyChanged;
         _project.ImageDurationSeconds = _settings.ImageDuration;
@@ -132,6 +177,7 @@ public partial class MainWindow : Window
         _preview.AttachProject(_project);
 
         LoadThumbnails();
+        _libraryDirty = true;
         RefreshLibrary();
         UpdateProjectUi();
         UpdateSelectionUi();
@@ -140,6 +186,12 @@ public partial class MainWindow : Window
         UpdateTransportUi();
         UpdatePreviewVisibility();
         _preview.Refresh();
+
+        if (_effectsVisible)
+        {
+            var clip = _project.SelectedClip;
+            AttachEffects(clip != null && clip.Kind != MediaKind.Audio ? clip : null);
+        }
     }
 
     private void LoadThumbnails()
@@ -153,6 +205,11 @@ public partial class MainWindow : Window
 
     private void Project_TimelineChanged(object? sender, EventArgs e)
     {
+        if (!_nudging)
+        {
+            _nudgeClipId = null;
+            _nudgeStamp = default;
+        }
         SetDirty(true);
         UpdateProjectUi();
         UpdateSelectionUi();
@@ -162,6 +219,8 @@ public partial class MainWindow : Window
     }
 
     private void Project_SelectionChanged(object? sender, EventArgs e) => UpdateSelectionUi();
+
+    private void Project_RangeChanged(object? sender, EventArgs e) => SetDirty(true);
 
     private void Project_PlayheadChanged(object? sender, EventArgs e)
     {
@@ -201,11 +260,55 @@ public partial class MainWindow : Window
 
     private void UpdateSelectionUi()
     {
+        var count = _project.SelectionCount;
         var clip = _project.SelectedClip;
-        SelectionText.Text = clip == null
-            ? "No clip selected"
-            : $"{clip.Name}  ·  {MediaAsset.FormatDuration(clip.DurationSeconds)}";
-        DeleteButton.IsEnabled = clip != null;
+
+        SelectionText.Text = count switch
+        {
+            0 => "No clip selected",
+            1 when clip != null => $"{clip.Name}  ·  {MediaAsset.FormatDuration(clip.DurationSeconds)}",
+            _ => $"{count} clips selected"
+        };
+
+        DeleteButton.IsEnabled = count > 0;
+
+        if (_effectsVisible)
+            UpdateEffectsForSelection();
+    }
+
+    /// <summary>Keeps the effects inspector pointed at the selected visual clip.</summary>
+    private void UpdateEffectsForSelection()
+    {
+        if (_effectsAttaching) return;
+
+        var clip = _project.SelectedClip;
+        var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+        if (ReferenceEquals(target, EffectsHost.EditedClip)) return;
+
+        _effectsAttaching = true;
+        try
+        {
+            FlushEffects();
+            AttachEffects(target);
+        }
+        finally
+        {
+            _effectsAttaching = false;
+        }
+    }
+
+    private void AttachEffects(TimelineClip? clip)
+    {
+        _effectsCaptured = false;
+        _effectsSnapshot = clip != null ? ProjectService.Capture(_project) : null;
+        EffectsHost.Attach(_project, clip);
+    }
+
+    private void FlushEffects()
+    {
+        if (!_effectsTimer.IsEnabled) return;
+        _effectsTimer.Stop();
+        _project.NotifyEffectChanged();
     }
 
     private void UpdateUndoButtons()
@@ -228,6 +331,7 @@ public partial class MainWindow : Window
             Preview.Visibility = Visibility.Collapsed;
             PreviewPlaceholder.Visibility = Visibility.Visible;
             PreviewPlaceholderContent.Visibility = Visibility.Visible;
+            PreviewRelinkButton.Visibility = Visibility.Collapsed;
             PreviewPlaceholderText.Text = "Preview engine unavailable";
             PreviewPlaceholderHint.Text = engineError;
             return;
@@ -241,6 +345,7 @@ public partial class MainWindow : Window
         if (showVideo) return;
 
         var clip = _project.GetPreviewClipAt(_project.Playhead);
+        PreviewRelinkButton.Visibility = Visibility.Collapsed;
 
         // Playing over a gap: keep the monitor black, like a real player.
         PreviewPlaceholderContent.Visibility =
@@ -264,12 +369,54 @@ public partial class MainWindow : Window
         if (asset == null || asset.IsMissing)
         {
             PreviewPlaceholderText.Text = "Media file is missing";
-            PreviewPlaceholderHint.Text = asset?.FilePath ?? "Re-link this clip by importing the file again.";
+            PreviewPlaceholderHint.Text = asset?.FilePath ?? "Locate the file to repair this clip.";
+            if (asset != null) PreviewRelinkButton.Visibility = Visibility.Visible;
             return;
         }
 
         PreviewPlaceholderText.Text = "Preview unavailable";
         PreviewPlaceholderHint.Text = "mpv could not open this file.";
+    }
+
+    private void RailMedia_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(false);
+
+    private void RailEffects_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(true);
+
+    /// <summary>
+    /// Swaps the media library for the effects inspector in the same column, so
+    /// the monitor stays visible while an effect is adjusted.
+    /// </summary>
+    private void ShowLeftPanel(bool effects)
+    {
+        _effectsVisible = effects;
+        RailMedia.IsChecked = !effects;
+        RailEffects.IsChecked = effects;
+
+        MediaLibraryPanel.Visibility = effects ? Visibility.Collapsed : Visibility.Visible;
+        EffectsPanelBorder.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
+
+        if (effects)
+        {
+            _preview.Pause();
+            var clip = _project.SelectedClip;
+            var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+
+            _effectsAttaching = true;
+            try
+            {
+                FlushEffects();
+                AttachEffects(target);
+            }
+            finally
+            {
+                _effectsAttaching = false;
+            }
+        }
+        else
+        {
+            FlushEffects();
+            Timeline.Focus();
+        }
     }
 
     private async void CropPanClip(TimelineClip clip)
@@ -298,7 +445,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialog = new CropPanDialog(clip, still) { Owner = this };
+        var projectAspect = _project.Height > 0
+            ? (double)_project.Width / _project.Height
+            : 16.0 / 9.0;
+        var dialog = new CropPanDialog(clip, still, projectAspect) { Owner = this };
         if (dialog.ShowDialog() != true) return;
 
         _project.BeginEdit();
@@ -314,6 +464,9 @@ public partial class MainWindow : Window
 
         clip.PanX = dialog.PanX;
         clip.PanY = dialog.PanY;
+        clip.Scale = dialog.Scale;
+        clip.PositionX = dialog.PositionX;
+        clip.PositionY = dialog.PositionY;
         _project.NotifyTimelineChanged();
     }
 
@@ -349,9 +502,23 @@ public partial class MainWindow : Window
 
     // ================================================================ library
 
-    private void RefreshLibrary()
+    /// <summary>
+    /// Rebuilds the library list. Timeline edits do not change the asset set, so
+    /// they only refresh the count; rebuilding on every edit would reset the
+    /// selection and scroll position while arranging a long sequence.
+    /// </summary>
+    private void RefreshLibrary(bool force = false)
     {
         if (_project == null) return;
+
+        EnsureWaveforms();
+
+        if (!force && !_libraryDirty)
+        {
+            LibraryCountText.Text = _project.Assets.Count.ToString();
+            return;
+        }
+        _libraryDirty = false;
 
         // Undo/redo rebuilds assets, which drops decoded thumbnails; restore them.
         foreach (var asset in _project.Assets)
@@ -371,9 +538,138 @@ public partial class MainWindow : Window
         if (search.Length > 0)
             assets = assets.Where(a => a.Name.Contains(search, StringComparison.OrdinalIgnoreCase));
 
-        MediaList.ItemsSource = assets.ToList();
+        var selectedId = (MediaList.SelectedItem as MediaAsset)?.Id;
+        var scrollOffset = LibraryScroll?.VerticalOffset ?? 0;
+
+        var list = assets.ToList();
+        MediaList.ItemsSource = list;
+
+        if (selectedId is { } id)
+        {
+            var restored = list.FirstOrDefault(a => a.Id == id);
+            if (restored != null) MediaList.SelectedItem = restored;
+        }
+
+        if (scrollOffset > 0)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded,
+                new Action(() => LibraryScroll?.ScrollToVerticalOffset(scrollOffset)));
+        }
+
         LibraryCountText.Text = _project.Assets.Count.ToString();
+    }
+
+    private ScrollViewer? _libraryScroll;
+
+    private ScrollViewer? LibraryScroll =>
+        _libraryScroll ??= FindDescendant<ScrollViewer>(MediaList);
+
+    private static T? FindDescendant<T>(DependencyObject root) where T : DependencyObject
+    {
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) return match;
+            if (FindDescendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? node) where T : DependencyObject
+    {
+        while (node != null)
+        {
+            if (node is T match) return match;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    // ---------------------------------------------------------------- relink
+
+    private void RelinkSelectedAsset_Click(object sender, RoutedEventArgs e)
+    {
+        if (MediaList.SelectedItem is MediaAsset asset) _ = RelinkAssetAsync(asset);
+    }
+
+    private void PreviewRelink_Click(object sender, RoutedEventArgs e)
+    {
+        var clip = _project.GetPreviewClipAt(_project.Playhead);
+        var asset = clip == null ? null : _project.FindAsset(clip.AssetId);
+        if (asset != null) _ = RelinkAssetAsync(asset);
+    }
+
+    /// <summary>
+    /// Points an existing library asset at a new file. Clips reference the
+    /// asset by id, so this repairs a project whose media moved without
+    /// touching the edit.
+    /// </summary>
+    private async Task RelinkAssetAsync(MediaAsset asset)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Relink media",
+            Filter = MediaProbeService.OpenFileFilter,
+            CheckFileExists = true,
+            FileName = Path.GetFileName(asset.FilePath)
+        };
+
+        var folder = string.IsNullOrWhiteSpace(asset.FilePath)
+            ? null
+            : Path.GetDirectoryName(asset.FilePath);
+        if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder))
+            dialog.InitialDirectory = folder;
+
+        if (dialog.ShowDialog(this) != true) return;
+
+        var path = dialog.FileName;
+        var kind = MediaProbeService.DetectKind(path);
+        if (kind != asset.Kind)
+        {
+            MessageDialog.ShowInfo(this, "Relink media",
+                $"“{asset.Name}” is a {asset.Kind.ToLabel().ToLowerInvariant()} clip.\n\n" +
+                $"Choose a {asset.Kind.ToLabel().ToLowerInvariant()} file.");
+            return;
+        }
+
+        MediaInfo info;
+        try
+        {
+            info = await MediaProbeService.ProbeAsync(path);
+        }
+        catch
+        {
+            info = new MediaInfo(0, 0, 0, kind == MediaKind.Audio);
+        }
+
+        var previousName = asset.Name;
+
+        _project.BeginEdit();
+        asset.FilePath = path;
+        asset.Name = Path.GetFileName(path);
+        asset.DurationSeconds = info.Duration;
+        asset.Width = info.Width;
+        asset.Height = info.Height;
+        asset.HasAudio = info.HasAudio;
+        asset.IsMissing = false;
+        asset.Peaks = null;
+        asset.Thumbnail = null;
+        asset.SetFilmstrip(Array.Empty<ImageSource>());
+        asset.FilmstripUnavailable = false;
+
+        // Keep timeline labels in step when they still carried the old file name.
+        foreach (var track in _project.Tracks)
+            foreach (var clip in track.Clips.Where(c => c.AssetId == asset.Id && c.Name == previousName))
+                clip.Name = asset.Name;
+
+        _libraryDirty = true;
+        _project.NotifyTimelineChanged();
+        RefreshLibrary(force: true);
         EnsureWaveforms();
+        Timeline.InvalidateVisual();
+        _preview.Refresh();
+        SetStatus($"Relinked {asset.Name}", ReadyDotBrush);
     }
 
     private readonly HashSet<string> _waveformLoading = new(StringComparer.OrdinalIgnoreCase);
@@ -443,11 +739,7 @@ public partial class MainWindow : Window
         ChipVideo.IsChecked = kind == MediaKind.Video;
         ChipAudio.IsChecked = kind == MediaKind.Audio;
         ChipImage.IsChecked = kind == MediaKind.Image;
-        RailAll.IsChecked = kind == null;
-        RailVideo.IsChecked = kind == MediaKind.Video;
-        RailAudio.IsChecked = kind == MediaKind.Audio;
-        RailImage.IsChecked = kind == MediaKind.Image;
-        RefreshLibrary();
+        RefreshLibrary(force: true);
     }
 
     private static MediaKind? ParseFilterTag(string? tag) => tag switch
@@ -464,26 +756,44 @@ public partial class MainWindow : Window
             ApplyFilter(ParseFilterTag(toggle.Tag as string));
     }
 
-    private void RailFilter_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleButton toggle)
-            ApplyFilter(ParseFilterTag(toggle.Tag as string));
-    }
-
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        if (_project != null) RefreshLibrary();
+        if (_project != null) RefreshLibrary(force: true);
     }
 
     private void MediaList_SelectionChanged(object sender, SelectionChangedEventArgs e) { }
 
     private void MediaList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (MediaList.SelectedItem is MediaAsset asset) AddAssetToTimeline(asset, _project.Playhead);
+        // Double-clicking the empty area below the items must not re-add the
+        // previously selected asset.
+        if (FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject) == null) return;
+        if ((_assetDragItem ?? MediaList.SelectedItem as MediaAsset) is not { } asset) return;
+
+        if (asset.IsMissing)
+        {
+            _ = RelinkAssetAsync(asset);
+            return;
+        }
+
+        AddAssetToTimeline(asset, _project.Playhead);
     }
 
-    private void MediaList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e) =>
+    private void MediaList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
         _assetDragStart = e.GetPosition(MediaList);
+        _assetDragItem = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject)?.DataContext
+            as MediaAsset;
+    }
+
+    private void MediaList_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        // Right-clicking an unselected item should target that item, not the
+        // previous selection.
+        var item = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
+        if (item?.DataContext is MediaAsset asset && !MediaList.SelectedItems.Contains(asset))
+            MediaList.SelectedItem = asset;
+    }
 
     private void MediaList_PreviewMouseMove(object sender, MouseEventArgs e)
     {
@@ -491,29 +801,100 @@ public partial class MainWindow : Window
         var point = e.GetPosition(MediaList);
         if (Math.Abs(point.X - _assetDragStart.X) < 6 && Math.Abs(point.Y - _assetDragStart.Y) < 6)
             return;
-        if (MediaList.SelectedItem is not MediaAsset asset) return;
+        if (_assetDragItem is not { } asset) return;
+        if (!MediaList.SelectedItems.Contains(asset)) MediaList.SelectedItem = asset;
 
         DragDrop.DoDragDrop(MediaList,
             new DataObject(AssetDragFormat, asset.Id.ToString()), DragDropEffects.Copy);
     }
 
-    private void AddSelectedAsset_Click(object sender, RoutedEventArgs e)
+    private void AddSelectedAsset_Click(object sender, RoutedEventArgs e) =>
+        AddSelectedAssetsToTimeline();
+
+    /// <summary>
+    /// Adds every selected library item in list order. Clips on the same layer
+    /// land back to back, so selecting ten files and pressing Enter assembles
+    /// the whole sequence in one go.
+    /// </summary>
+    private void AddSelectedAssetsToTimeline()
     {
-        if (MediaList.SelectedItem is MediaAsset asset) AddAssetToTimeline(asset, _project.Playhead);
+        var assets = MediaList.SelectedItems.Cast<MediaAsset>().ToList();
+        if (assets.Count == 0)
+        {
+            FlashStatus("Select media in the library first");
+            return;
+        }
+
+        if (assets.Count == 1)
+        {
+            if (assets[0].IsMissing) FlashStatus("Media file is missing", error: true);
+            else AddAssetToTimeline(assets[0], _project.Playhead);
+            return;
+        }
+
+        if (assets.All(a => a.IsMissing))
+        {
+            FlashStatus("Media files are missing", error: true);
+            return;
+        }
+
+        _project.BeginEdit();
+        var placed = 0;
+        var missing = 0;
+        double? firstStart = null;
+        TimelineClip? last = null;
+
+        foreach (var asset in assets)
+        {
+            if (asset.IsMissing)
+            {
+                missing++;
+                continue;
+            }
+
+            var track = _project.EnsureTrack(asset.Kind);
+            if (track.IsLocked) continue;
+
+            var clip = _project.AddClip(asset, _project.Playhead, track, notify: false);
+            if (clip == null) continue;
+
+            firstStart ??= clip.StartSeconds;
+            last = clip;
+            placed++;
+        }
+
+        if (placed == 0)
+        {
+            FlashStatus("No unlocked track for this media", error: true);
+            return;
+        }
+
+        _project.Playhead = firstStart ?? _project.Playhead;
+        if (last != null) _project.SelectedClipId = last.Id;
+        _project.NotifyTimelineChanged();
+        Timeline.ScrollToPlayhead();
+
+        var message = $"Added {placed} clip{(placed == 1 ? "" : "s")} to the timeline";
+        if (missing > 0) FlashStatus($"{message} — {missing} missing");
+        else SetStatus(message, ReadyDotBrush);
     }
 
     private void RemoveSelectedAsset_Click(object sender, RoutedEventArgs e)
     {
-        if (MediaList.SelectedItem is not MediaAsset asset) return;
-        var result = MessageDialog.Show(this, "Remove media",
-            $"Remove “{asset.Name}” and its clips from the project?",
-            "Remove", null, "Cancel");
+        var assets = MediaList.SelectedItems.Cast<MediaAsset>().ToList();
+        if (assets.Count == 0) return;
+
+        var message = assets.Count == 1
+            ? $"Remove “{assets[0].Name}” and its clips from the project?"
+            : $"Remove {assets.Count} items and their clips from the project?";
+        var result = MessageDialog.Show(this, "Remove media", message, "Remove", null, "Cancel");
         if (result != MessageResult.Primary) return;
 
         _project.BeginEdit();
-        _project.RemoveAsset(asset);
+        _libraryDirty = true;
+        foreach (var asset in assets) _project.RemoveAsset(asset);
         _preview.Refresh();
-        SetStatus("Removed from library", ReadyDotBrush);
+        SetStatus(assets.Count == 1 ? "Removed from library" : $"Removed {assets.Count} items", ReadyDotBrush);
     }
 
     private void AddAssetToTimeline(MediaAsset asset, double at, TimelineTrack? preferredTrack = null,
@@ -563,7 +944,13 @@ public partial class MainWindow : Window
         var point = e.GetPosition(Timeline);
         e.Effects = DragDropEffects.None;
 
-        if (e.Data.GetDataPresent(AssetDragFormat) &&
+        if (e.Data.GetDataPresent(EffectDragFormat))
+        {
+            Timeline.ClearDropPlaceholder();
+            if (Timeline.ClipAtPoint(point) != null)
+                e.Effects = DragDropEffects.Copy;
+        }
+        else if (e.Data.GetDataPresent(AssetDragFormat) &&
             Guid.TryParse(e.Data.GetData(AssetDragFormat) as string, out var id))
         {
             var asset = _project.FindAsset(id);
@@ -610,6 +997,34 @@ public partial class MainWindow : Window
     {
         var point = e.GetPosition(Timeline);
         Timeline.ClearDropPlaceholder();
+
+        if (e.Data.GetDataPresent(EffectDragFormat) &&
+            e.Data.GetData(EffectDragFormat) is EffectDropData effectDrop)
+        {
+            e.Handled = true;
+            var target = Timeline.ClipAtPoint(point);
+            if (target == null || target.Kind == MediaKind.Audio)
+            {
+                FlashStatus("Drop the preset on a video or image clip", error: true);
+                return;
+            }
+
+            _project.BeginEdit();
+            var effect = target.Effects.FirstOrDefault(e => e.Kind == effectDrop.Kind);
+            if (effect == null)
+                effect = _project.AddEffect(target, effectDrop.Kind);
+
+            foreach (var pair in effectDrop.Values)
+                effect.Set(pair.Key, pair.Value);
+            effect.Enabled = true;
+            _project.NotifyEffectChanged();
+
+            _project.SelectedClipId = target.Id;
+            ShowLeftPanel(true);
+            EffectsHost.SelectEffect(effect);
+            FlashStatus($"{EffectCatalog.Get(effect.Kind).Name} applied to {target.Name}");
+            return;
+        }
 
         if (e.Data.GetDataPresent(AssetDragFormat))
         {
@@ -724,6 +1139,7 @@ public partial class MainWindow : Window
                     if (kind == MediaKind.Image)
                         asset.Thumbnail = MediaProbeService.LoadThumbnail(path);
                     known[path] = asset;
+                    _libraryDirty = true;
                     imported++;
                 }
 
@@ -884,6 +1300,7 @@ public partial class MainWindow : Window
             ProjectService.Save(_project, path);
             _currentPath = path;
             _settings.LastProjectPath = path;
+            AutosaveService.Clear();
             SetDirty(false);
             UpdateProjectUi();
             SetStatus($"Saved {Path.GetFileName(path)}", ReadyDotBrush);
@@ -893,6 +1310,96 @@ public partial class MainWindow : Window
         {
             MessageDialog.ShowInfo(this, "Save project",
                 $"YorteVegas could not save this project.\n\n{ex.Message}");
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------- autosave
+
+    private void AutosaveNow()
+    {
+        if (!_dirty || _project == null) return;
+        AutosaveService.Save(_project, _currentPath);
+    }
+
+    /// <summary>Picks up media that appeared (or vanished) since the project opened.</summary>
+    private void RefreshMissingMedia()
+    {
+        if (_project == null) return;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastMissingCheck).TotalSeconds < 2) return;
+        _lastMissingCheck = now;
+
+        var changed = false;
+        foreach (var asset in _project.Assets)
+        {
+            var missing = string.IsNullOrWhiteSpace(asset.FilePath) || !File.Exists(asset.FilePath);
+            if (missing == asset.IsMissing) continue;
+            asset.IsMissing = missing;
+            changed = true;
+        }
+
+        if (!changed) return;
+
+        _libraryDirty = true;
+        RefreshLibrary(force: true);
+        Timeline.InvalidateVisual();
+        _preview.Refresh();
+    }
+
+    /// <summary>
+    /// Offers unsaved work from a previous session. Returns true when a project
+    /// was recovered, so startup skips opening the last project.
+    /// </summary>
+    private bool TryRecoverAutosave()
+    {
+        if (!AutosaveService.HasRecovery) return false;
+
+        AutosaveService.LoadOriginalPath();
+        var original = AutosaveService.OriginalPath;
+        var written = AutosaveService.WrittenUtc;
+
+        // A project saved after the autosave is already up to date.
+        if (written is { } time && !string.IsNullOrWhiteSpace(original) &&
+            File.Exists(original) && File.GetLastWriteTimeUtc(original) >= time)
+        {
+            AutosaveService.Clear();
+            return false;
+        }
+
+        var result = MessageDialog.Show(this, "Recover project",
+            "YorteVegas found unsaved changes from a previous session.\n\nRecover them?",
+            "Recover", "Discard", null);
+
+        if (result == MessageResult.Secondary)
+        {
+            AutosaveService.Clear();
+            return false;
+        }
+
+        // Escape / closed dialog keeps the autosave for the next launch.
+        if (result != MessageResult.Primary) return false;
+
+        try
+        {
+            var project = new EditProject();
+            ProjectService.LoadInto(AutosaveService.ProjectPath, project);
+            project.ImageDurationSeconds = _settings.ImageDuration;
+
+            AttachProject(project);
+            _currentPath = AutosaveService.OriginalPath;
+            SetDirty(true);
+            ResetTimelineView();
+            _preview.Refresh();
+            SetStatus("Recovered unsaved changes", WarnDotBrush);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageDialog.ShowInfo(this, "Recover project",
+                $"YorteVegas could not recover the autosave.\n\n{ex.Message}");
+            AutosaveService.Clear();
             return false;
         }
     }
@@ -925,6 +1432,8 @@ public partial class MainWindow : Window
     private void Undo_Click(object sender, RoutedEventArgs e)
     {
         if (!_project.Undo.Undo(_project)) return;
+        _libraryDirty = true;
+        RefreshLibrary(force: true);
         _preview.Refresh();
         Timeline.ScrollToPlayhead();
     }
@@ -932,30 +1441,112 @@ public partial class MainWindow : Window
     private void Redo_Click(object sender, RoutedEventArgs e)
     {
         if (!_project.Undo.Redo(_project)) return;
+        _libraryDirty = true;
+        RefreshLibrary(force: true);
         _preview.Refresh();
         Timeline.ScrollToPlayhead();
     }
 
     private void Delete_Click(object sender, RoutedEventArgs e)
     {
-        var clip = _project.SelectedClip;
-        if (clip == null)
+        var clips = _project.SelectedClips();
+        if (clips.Count == 0)
         {
             FlashStatus("Select a clip first");
             return;
         }
 
-        var track = _project.TrackOf(clip);
-        if (track?.IsLocked == true)
+        if (clips.All(c => _project.TrackOf(c)?.IsLocked == true))
         {
             FlashStatus("This track is locked", error: true);
             return;
         }
 
         _project.BeginEdit();
-        _project.DeleteClip(clip);
+        var deleted = _project.DeleteSelectedClips();
+        if (deleted == 0)
+        {
+            FlashStatus("This track is locked", error: true);
+            return;
+        }
+
         _preview.Refresh();
-        SetStatus("Clip deleted", ReadyDotBrush);
+        SetStatus(deleted == 1 ? "Clip deleted" : $"{deleted} clips deleted", ReadyDotBrush);
+    }
+
+    private void DeleteAndCloseGap()
+    {
+        var clips = _project.SelectedClips();
+        if (clips.Count == 0)
+        {
+            FlashStatus("Select a clip first");
+            return;
+        }
+
+        if (clips.All(c => _project.TrackOf(c)?.IsLocked == true))
+        {
+            FlashStatus("This track is locked", error: true);
+            return;
+        }
+
+        _project.BeginEdit();
+        var deleted = _project.DeleteSelectedClipsAndCloseGaps();
+        if (deleted == 0)
+        {
+            FlashStatus("This track is locked", error: true);
+            return;
+        }
+
+        _preview.Refresh();
+        SetStatus(deleted == 1
+            ? "Clip deleted and gap closed"
+            : $"{deleted} clips deleted and gaps closed", ReadyDotBrush);
+    }
+
+    /// <summary>Moves the selected clip by frames (Alt+arrows) or a second (with Shift).</summary>
+    private void NudgeSelectedClip(int direction, bool big)
+    {
+        var clips = _project.SelectedClips()
+            .Where(c => _project.TrackOf(c) is { IsLocked: false })
+            .ToList();
+        if (clips.Count == 0)
+        {
+            FlashStatus("Select an unlocked clip first");
+            return;
+        }
+
+        // Holding the key repeats: keep one undo entry for the whole nudge.
+        var now = DateTime.UtcNow;
+        var sameGesture = _nudging ||
+                          (_nudgeClipId == _project.SelectedClipId &&
+                           (now - _nudgeStamp).TotalMilliseconds < 900);
+        if (!sameGesture) _project.BeginEdit();
+        _nudgeClipId = _project.SelectedClipId;
+        _nudgeStamp = now;
+
+        var step = big ? 1.0 : _project.FrameDuration;
+        var delta = direction * step;
+
+        _nudging = true;
+        try
+        {
+            _project.NudgeSelectedClips(delta);
+        }
+        finally
+        {
+            _nudging = false;
+        }
+
+        _preview.Refresh();
+        Timeline.ScrollToPlayhead();
+    }
+
+    /// <summary>Jumps the playhead to the previous/next clip edge on any layer.</summary>
+    private void JumpToEdit(int direction)
+    {
+        if (_project.FindEditPoint(_project.Playhead, direction) is not { } time) return;
+        _project.Playhead = _project.SnapToFrame(time);
+        Timeline.ScrollToPlayhead();
     }
 
     private void Split_Click(object sender, RoutedEventArgs e)
@@ -1019,6 +1610,67 @@ public partial class MainWindow : Window
         _preview.Refresh();
         SetStatus("Clip duplicated", ReadyDotBrush);
     }
+
+    private void CopyClips()
+    {
+        var count = _project.CopySelectedClips();
+        if (count == 0)
+        {
+            FlashStatus("Select a clip first");
+            return;
+        }
+
+        SetStatus(count == 1 ? "Clip copied" : $"{count} clips copied", ReadyDotBrush);
+    }
+
+    private void PasteClips()
+    {
+        if (!_project.CanPasteClips)
+        {
+            FlashStatus("Nothing to paste");
+            return;
+        }
+
+        _project.BeginEdit();
+        var count = _project.PasteClips(_project.Playhead);
+        if (count == 0)
+        {
+            FlashStatus("Could not paste here", error: true);
+            return;
+        }
+
+        _preview.Refresh();
+        Timeline.ScrollToPlayhead();
+        SetStatus(count == 1 ? "Clip pasted" : $"{count} clips pasted", ReadyDotBrush);
+    }
+
+    private void SplitAllAtPlayhead()
+    {
+        if (!_project.HasClipAtPlayhead())
+        {
+            FlashStatus("Place the playhead inside a clip", error: true);
+            return;
+        }
+
+        _project.BeginEdit();
+        var count = _project.SplitAllAtPlayhead();
+        _preview.Refresh();
+        SetStatus(count == 1 ? "Clip split" : $"{count} clips split", ReadyDotBrush);
+    }
+
+    private void ZoomSelection()
+    {
+        Timeline.ZoomToSelection();
+        ZoomText.Text = $"{Timeline.PixelsPerSecond:0} px/s";
+    }
+
+    private void CopyClips_Click(object sender, RoutedEventArgs e) => CopyClips();
+
+    private void PasteClips_Click(object sender, RoutedEventArgs e) => PasteClips();
+
+    private void SplitAll_Click(object sender, RoutedEventArgs e) => SplitAllAtPlayhead();
+
+    private void ZoomSelection_Click(object sender, RoutedEventArgs e) => ZoomSelection();
 
     private void AddVideoTrack_Click(object sender, RoutedEventArgs e)
     {
@@ -1245,13 +1897,25 @@ public partial class MainWindow : Window
             "  ← / →            Step one frame (Shift: one second)\n" +
             "  Home / End       Go to start / end\n" +
             "  S                Split at playhead\n" +
+            "  Shift+S          Split every layer at the playhead\n" +
+            "  Ctrl+A           Select all clips\n" +
+            "  Ctrl+C / Ctrl+V  Copy / paste clips at the playhead\n" +
             "  Ctrl+D           Duplicate selected clip\n" +
             "  Delete           Delete selected clip\n" +
+            "  Shift+Delete     Delete and close the gap\n" +
+            "  Z                Zoom to the selection\n" +
+            "  Alt+← / →        Nudge selected clip (Shift: one second)\n" +
+            "  , / .            Jump to previous / next cut\n" +
+            "  Drag empty space Select the export range\n" +
+            "  Double-click clip Set the export range to that clip\n" +
             "  Wheel            Zoom timeline at the pointer\n" +
             "  Shift+wheel      Scroll timeline\n" +
             "  Alt+wheel        Scroll layers\n" +
             "  Right-click layer  Rename / remove layer\n" +
             "  Drag right edge  Trim; past the source end loops it\n" +
+            "  Drag top corner  Set the fade in / fade out length\n" +
+            "  Ctrl+click       Add / remove a clip from the selection\n" +
+            "  Shift+click      Select a run of clips on one layer\n" +
             "  Ctrl+drag clip   Duplicate while dragging\n" +
             "  Ctrl+drag right  Time-stretch (slow / fast motion)\n\n" +
             "Project\n" +
@@ -1314,15 +1978,18 @@ public partial class MainWindow : Window
         {
             TryOpenProject(_startupProject);
         }
-        else if (_settings.OpenLastProject &&
-                 !string.IsNullOrWhiteSpace(_settings.LastProjectPath) &&
-                 File.Exists(_settings.LastProjectPath))
+        else if (!TryRecoverAutosave())
         {
-            TryOpenProject(_settings.LastProjectPath);
-        }
-        else if (_settings.OpenLastProject && !string.IsNullOrWhiteSpace(_settings.LastProjectPath))
-        {
-            SetStatus("Last project not found — started a new one", WarnDotBrush);
+            if (_settings.OpenLastProject &&
+                !string.IsNullOrWhiteSpace(_settings.LastProjectPath) &&
+                File.Exists(_settings.LastProjectPath))
+            {
+                TryOpenProject(_settings.LastProjectPath);
+            }
+            else if (_settings.OpenLastProject && !string.IsNullOrWhiteSpace(_settings.LastProjectPath))
+            {
+                SetStatus("Last project not found — started a new one", WarnDotBrush);
+            }
         }
 
         if (_startupImports is { Count: > 0 })
@@ -1343,6 +2010,7 @@ public partial class MainWindow : Window
         }
 
         _forceClose = true;
+        AutosaveService.Clear();
         _preview.Dispose();
 
         _settings.PreviewVolume = VolumeSlider.Value;
@@ -1368,6 +2036,13 @@ public partial class MainWindow : Window
         if (textFocused && !(ctrl && key is Key.S or Key.O or Key.N or Key.I or Key.E))
             return;
 
+        if (key == Key.Enter && MediaList.IsKeyboardFocusWithin)
+        {
+            AddSelectedAssetsToTimeline();
+            e.Handled = true;
+            return;
+        }
+
         if (ctrl)
         {
             switch (key)
@@ -1387,6 +2062,13 @@ public partial class MainWindow : Window
                     e.Handled = true;
                     return;
                 case Key.Y: Redo_Click(this, new RoutedEventArgs()); e.Handled = true; return;
+                case Key.A:
+                    if (MediaList.IsKeyboardFocusWithin) MediaList.SelectAll();
+                    else _project.SelectAllClips();
+                    e.Handled = true;
+                    return;
+                case Key.C: CopyClips(); e.Handled = true; return;
+                case Key.V: PasteClips(); e.Handled = true; return;
                 case Key.D: Duplicate_Click(this, new RoutedEventArgs()); e.Handled = true; return;
                 case Key.K: Split_Click(this, new RoutedEventArgs()); e.Handled = true; return;
                 case Key.OemPlus:
@@ -1403,6 +2085,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        var alt = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+        if (alt && key is Key.Left or Key.Right)
+        {
+            NudgeSelectedClip(key == Key.Left ? -1 : 1, shift);
+            e.Handled = true;
+            return;
+        }
+
         switch (key)
         {
             case Key.Space:
@@ -1411,11 +2101,25 @@ public partial class MainWindow : Window
                 e.Handled = true;
                 break;
             case Key.Delete:
-                Delete_Click(this, new RoutedEventArgs());
+                if (shift) DeleteAndCloseGap();
+                else Delete_Click(this, new RoutedEventArgs());
+                e.Handled = true;
+                break;
+            case Key.OemComma:
+                JumpToEdit(-1);
+                e.Handled = true;
+                break;
+            case Key.OemPeriod:
+                JumpToEdit(1);
                 e.Handled = true;
                 break;
             case Key.S:
-                Split_Click(this, new RoutedEventArgs());
+                if (shift) SplitAllAtPlayhead();
+                else Split_Click(this, new RoutedEventArgs());
+                e.Handled = true;
+                break;
+            case Key.Z:
+                ZoomSelection();
                 e.Handled = true;
                 break;
             case Key.Left:

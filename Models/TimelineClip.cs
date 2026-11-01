@@ -23,6 +23,9 @@ public sealed class TimelineClip : ObservableObject
     private double _cropBottom;
     private double _panX;
     private double _panY;
+    private double _scale = 1;
+    private double _positionX;
+    private double _positionY;
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AssetId { get; set; }
@@ -134,6 +137,43 @@ public sealed class TimelineClip : ObservableObject
     public bool HasCrop => _cropLeft > 0.001 || _cropRight > 0.001 ||
                            _cropTop > 0.001 || _cropBottom > 0.001 ||
                            Math.Abs(_panX) > 0.001 || Math.Abs(_panY) > 0.001;
+
+    /// <summary>
+    /// Size of the clip on the project frame, relative to the fitted size.
+    /// 1 = fit (full frame for matching aspects, letterboxed otherwise).
+    /// </summary>
+    public double Scale
+    {
+        get => _scale;
+        set => SetProperty(ref _scale, Math.Clamp(value, 0.05, 4));
+    }
+
+    /// <summary>Centre offset from the frame centre, as a fraction of the frame.</summary>
+    public double PositionX
+    {
+        get => _positionX;
+        set => SetProperty(ref _positionX, Math.Clamp(value, -1, 1));
+    }
+
+    public double PositionY
+    {
+        get => _positionY;
+        set => SetProperty(ref _positionY, Math.Clamp(value, -1, 1));
+    }
+
+    public bool HasPlacement => Math.Abs(_scale - 1) > 0.001 ||
+                                Math.Abs(_positionX) > 0.001 ||
+                                Math.Abs(_positionY) > 0.001;
+
+    /// <summary>
+    /// The clip's effect stack, applied top to bottom. Effects are visual only;
+    /// they render in the monitor and in the export, never on the audio.
+    /// </summary>
+    public List<ClipEffect> Effects { get; set; } = new();
+
+    public bool HasEffects => Effects.Count > 0;
+
+    public int EnabledEffectCount => Effects.Count(e => e.Enabled);
 
     /// <summary>Manual fade-in at the start of the clip, in project seconds.</summary>
     public double FadeInSeconds

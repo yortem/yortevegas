@@ -34,7 +34,10 @@ public static class ProjectService
             Height = project.Height,
             Fps = project.Fps,
             Playhead = project.Playhead,
-            SelectedClipId = project.SelectedClipId
+            SelectedClipId = project.SelectedClipId,
+            SelectedClipIds = project.SelectedClipIds.ToList(),
+            RangeStart = project.RangeStart,
+            RangeEnd = project.RangeEnd
         };
 
         foreach (var asset in project.Assets)
@@ -87,7 +90,16 @@ public static class ProjectService
                     CropTop = clip.CropTop,
                     CropBottom = clip.CropBottom,
                     PanX = clip.PanX,
-                    PanY = clip.PanY
+                    PanY = clip.PanY,
+                    Scale = clip.Scale,
+                    PositionX = clip.PositionX,
+                    PositionY = clip.PositionY,
+                    Effects = clip.Effects.Select(e => new EffectDto
+                    {
+                        Kind = e.Kind,
+                        Enabled = e.Enabled,
+                        Values = new Dictionary<string, double>(e.Values)
+                    }).ToList()
                 });
             }
             file.Tracks.Add(trackDto);
@@ -155,26 +167,78 @@ public static class ProjectService
                     CropTop = Math.Clamp(c.CropTop ?? 0, 0, 0.95),
                     CropBottom = Math.Clamp(c.CropBottom ?? 0, 0, 0.95),
                     PanX = Math.Clamp(c.PanX ?? 0, -1, 1),
-                    PanY = Math.Clamp(c.PanY ?? 0, -1, 1)
+                    PanY = Math.Clamp(c.PanY ?? 0, -1, 1),
+                    Scale = Math.Clamp(c.Scale ?? 1, 0.05, 4),
+                    PositionX = Math.Clamp(c.PositionX ?? 0, -1, 1),
+                    PositionY = Math.Clamp(c.PositionY ?? 0, -1, 1),
+                    Effects = (c.Effects ?? new List<EffectDto>()).Select(CreateEffect)
+                        .Where(e => e != null)
+                        .Select(e => e!)
+                        .ToList()
                 });
             }
             project.Tracks.Add(track);
         }
 
         project.Playhead = Math.Max(0, file.Playhead);
-        project.RestoreSelection(file.SelectedClipId);
+
+        if (file.RangeStart is { } rangeStart && file.RangeEnd is { } rangeEnd &&
+            rangeEnd - rangeStart > 0.001)
+        {
+            project.SetRange(rangeStart, rangeEnd);
+        }
+        else
+        {
+            project.ClearRange();
+        }
+
+        var savedSelection = file.SelectedClipIds ?? new List<Guid>();
+        var selected = savedSelection.Count > 0
+            ? savedSelection
+            : file.SelectedClipId is { } single ? new List<Guid> { single } : new List<Guid>();
+        var primary = file.SelectedClipId ?? (selected.Count > 0 ? selected[^1] : (Guid?)null);
+        project.RestoreSelection(selected, primary);
+
         project.NotifyReloaded();
     }
 
-    public static void Save(EditProject project, string path)
+    /// <summary>Rebuilds a stored effect, merging the catalog defaults.</summary>
+    private static ClipEffect? CreateEffect(EffectDto dto)
     {
-        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
-        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        var effect = EffectCatalog.TryCreate(dto.Kind);
+        if (effect == null) return null;
+
+        effect.Enabled = dto.Enabled;
+        foreach (var pair in dto.Values ?? new Dictionary<string, double>())
+            effect.Values[pair.Key] = pair.Value;
+        return effect;
+    }
+
+    /// <param name="relativeTo">
+    /// Folder used to store media paths relative to. Defaults to the folder of
+    /// <paramref name="path"/>; autosave passes the real project folder so the
+    /// recovered file resolves the same media.
+    /// </param>
+    public static void Save(EditProject project, string path, string? relativeTo = null)
+    {
+        var targetDirectory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(targetDirectory)) Directory.CreateDirectory(targetDirectory);
+
+        // relativeTo only decides how media paths are stored; it must not be
+        // created (an autosave can outlive its project folder).
+        var directory = string.IsNullOrEmpty(relativeTo) ? targetDirectory : relativeTo;
 
         var dto = Capture(project, directory);
         var json = JsonSerializer.Serialize(dto, JsonOptions);
 
-        // Write-then-replace so a failed save never destroys the previous file.
+        // Keep the previous version once per save, then write-then-replace so a
+        // failed save never destroys the current file.
+        if (File.Exists(path))
+        {
+            try { File.Copy(path, path + ".bak", true); }
+            catch { /* a locked backup must not block the save */ }
+        }
+
         var temp = path + ".tmp";
         File.WriteAllText(temp, json);
         File.Move(temp, path, true);
@@ -250,6 +314,13 @@ public sealed class ProjectFile
     public double Fps { get; set; } = 30;
     public double Playhead { get; set; }
     public Guid? SelectedClipId { get; set; }
+
+    /// <summary>Export range; null means the whole timeline.</summary>
+    public double? RangeStart { get; set; }
+    public double? RangeEnd { get; set; }
+
+    /// <summary>Multi-selection; older projects only carry <see cref="SelectedClipId"/>.</summary>
+    public List<Guid> SelectedClipIds { get; set; } = new();
     public List<AssetDto> Assets { get; set; } = new();
     public List<TrackDto> Tracks { get; set; } = new();
 }
@@ -297,5 +368,17 @@ public sealed class ClipDto
     public double? CropBottom { get; set; }
     public double? PanX { get; set; }
     public double? PanY { get; set; }
+    public double? Scale { get; set; } = 1;
+    public double? PositionX { get; set; }
+    public double? PositionY { get; set; }
     public double? PlaybackRate { get; set; } = 1;
+    public List<EffectDto> Effects { get; set; } = new();
+}
+
+/// <summary>One stored effect. Values are keyed so new parameters can be added.</summary>
+public sealed class EffectDto
+{
+    public EffectKind Kind { get; set; }
+    public bool Enabled { get; set; } = true;
+    public Dictionary<string, double> Values { get; set; } = new();
 }

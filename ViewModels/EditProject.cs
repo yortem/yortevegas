@@ -21,6 +21,9 @@ public sealed class EditProject : ObservableObject
     private double _fps = 30;
     private double _playhead;
     private Guid? _selectedClipId;
+    private readonly List<Guid> _selectedClipIds = new();
+    private double? _rangeStart;
+    private double? _rangeEnd;
 
     public EditProject()
     {
@@ -86,6 +89,7 @@ public sealed class EditProject : ObservableObject
     public event EventHandler? TimelineChanged;
     public event EventHandler? SelectionChanged;
     public event EventHandler? PlayheadChanged;
+    public event EventHandler? RangeChanged;
     public event EventHandler? UndoStateChanged;
 
     public string ResolutionLabel => $"{Width} × {Height}";
@@ -105,24 +109,214 @@ public sealed class EditProject : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Primary selection (the clip menus and the info strip act on it). Setting
+    /// it replaces any multi-selection with this single clip.
+    /// </summary>
     public Guid? SelectedClipId
     {
         get => _selectedClipId;
-        set
-        {
-            if (_selectedClipId == value) return;
-            var previous = FindClip(_selectedClipId);
-            if (previous != null) previous.IsSelected = false;
-            _selectedClipId = value;
-            var current = FindClip(_selectedClipId);
-            if (current != null) current.IsSelected = true;
-            OnPropertyChanged();
-            OnPropertyChanged(nameof(SelectedClip));
-            SelectionChanged?.Invoke(this, EventArgs.Empty);
-        }
+        set => ApplySelection(value is { } id ? new[] { id } : Array.Empty<Guid>(), value);
     }
 
     public TimelineClip? SelectedClip => FindClip(_selectedClipId);
+
+    /// <summary>Start of the export range, or null when the whole timeline is exported.</summary>
+    public double? RangeStart => _rangeStart;
+
+    public double? RangeEnd => _rangeEnd;
+
+    public bool HasRange =>
+        _rangeStart is { } start && _rangeEnd is { } end && end - start > FrameDuration * 0.5;
+
+    public void SetRange(double start, double end)
+    {
+        var from = SnapToFrame(Math.Max(0, Math.Min(start, end)));
+        var to = SnapToFrame(Math.Max(0, Math.Max(start, end)));
+        if (to - from < FrameDuration * 0.5)
+        {
+            ClearRange();
+            return;
+        }
+
+        if (_rangeStart is { } currentStart && _rangeEnd is { } currentEnd &&
+            Math.Abs(currentStart - from) < 0.000001 &&
+            Math.Abs(currentEnd - to) < 0.000001)
+        {
+            return;
+        }
+
+        _rangeStart = from;
+        _rangeEnd = to;
+        OnPropertyChanged(nameof(RangeStart));
+        OnPropertyChanged(nameof(RangeEnd));
+        OnPropertyChanged(nameof(HasRange));
+        RangeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void ClearRange()
+    {
+        if (_rangeStart == null && _rangeEnd == null) return;
+
+        _rangeStart = null;
+        _rangeEnd = null;
+        OnPropertyChanged(nameof(RangeStart));
+        OnPropertyChanged(nameof(RangeEnd));
+        OnPropertyChanged(nameof(HasRange));
+        RangeChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Every selected clip id; the primary is <see cref="SelectedClipId"/>.</summary>
+    public IReadOnlyList<Guid> SelectedClipIds => _selectedClipIds;
+
+    public int SelectionCount => _selectedClipIds.Count;
+
+    public bool IsClipSelected(Guid id) => _selectedClipIds.Contains(id);
+
+    public IReadOnlyList<TimelineClip> SelectedClips() =>
+        _selectedClipIds.Select(id => FindClip(id)).Where(c => c != null)
+            .Cast<TimelineClip>().ToList();
+
+    public void SetSelection(IEnumerable<Guid> ids, Guid? primary = null) =>
+        ApplySelection(ids, primary);
+
+    /// <summary>Ctrl+click: add or remove one clip without disturbing the rest.</summary>
+    public void ToggleClipSelection(TimelineClip clip)
+    {
+        var ids = new List<Guid>(_selectedClipIds);
+        var added = !ids.Remove(clip.Id);
+        if (added) ids.Add(clip.Id);
+        ApplySelection(ids, added ? clip.Id : ids.Count > 0 ? ids[^1] : null);
+    }
+
+    /// <summary>Shift+click: select the run of clips between the anchor and the target.</summary>
+    public void SelectRange(TimelineTrack track, TimelineClip anchor, TimelineClip target)
+    {
+        var clips = track.Clips
+            .OrderBy(c => c.StartSeconds)
+            .ThenBy(c => c.Id)
+            .ToList();
+        var from = clips.IndexOf(anchor);
+        var to = clips.IndexOf(target);
+        if (from < 0 || to < 0) return;
+        if (from > to) (from, to) = (to, from);
+        ApplySelection(clips.Skip(from).Take(to - from + 1).Select(c => c.Id), target.Id);
+    }
+
+    /// <summary>Selects every clip on every layer.</summary>
+    public int SelectAllClips()
+    {
+        var ids = Tracks
+            .SelectMany(t => t.Clips.OrderBy(c => c.StartSeconds))
+            .Select(c => c.Id)
+            .ToList();
+        ApplySelection(ids, ids.Count > 0 ? ids[^1] : null);
+        return ids.Count;
+    }
+
+    public int SelectTrackClips(TimelineTrack track)
+    {
+        var ids = track.Clips.OrderBy(c => c.StartSeconds).Select(c => c.Id).ToList();
+        ApplySelection(ids, ids.Count > 0 ? ids[^1] : null);
+        return ids.Count;
+    }
+
+    /// <summary>True when the clipboard holds clips whose media still exists here.</summary>
+    public bool CanPasteClips =>
+        ClipClipboard.HasClips && ClipClipboard.Items.Any(i => FindAsset(i.AssetId) != null);
+
+    /// <summary>Copies the selection into the in-app clip clipboard.</summary>
+    public int CopySelectedClips()
+    {
+        var clips = SelectedClips().OrderBy(c => c.StartSeconds).ToList();
+        if (clips.Count == 0) return 0;
+
+        ClipClipboard.Set(clips.Select(c =>
+            ClipClipboard.Capture(c, TrackOf(c)?.Id ?? Guid.Empty)));
+        return clips.Count;
+    }
+
+    /// <summary>
+    /// Pastes the clipboard at a project time, keeping the relative offsets of
+    /// the copied clips and preferring their original layers.
+    /// </summary>
+    public int PasteClips(double at)
+    {
+        if (!CanPasteClips) return 0;
+
+        var items = ClipClipboard.Items;
+        var baseStart = items.Min(i => i.Start);
+        var pasted = new List<TimelineClip>();
+
+        foreach (var item in items)
+        {
+            if (FindAsset(item.AssetId) == null) continue;
+
+            var track = Tracks.FirstOrDefault(t =>
+                    t.Id == item.TrackId && !t.IsLocked && t.Accepts(item.Kind))
+                ?? EnsureTrack(item.Kind);
+            if (track.IsLocked) continue;
+
+            var clip = new TimelineClip
+            {
+                AssetId = item.AssetId,
+                Name = item.Name,
+                Kind = item.Kind,
+                StartSeconds = Math.Max(0, SnapToFrame(at + item.Start - baseStart)),
+                DurationSeconds = item.Duration,
+                InSeconds = item.In,
+                FadeCurve = item.FadeCurve,
+                Opacity = item.Opacity,
+                Volume = item.Volume,
+                PlaybackRate = item.PlaybackRate,
+                FadeInSeconds = item.FadeIn,
+                FadeOutSeconds = item.FadeOut,
+                CropLeft = item.CropLeft,
+                CropRight = item.CropRight,
+                CropTop = item.CropTop,
+                CropBottom = item.CropBottom,
+                PanX = item.PanX,
+                PanY = item.PanY,
+                Scale = item.Scale,
+                PositionX = item.PositionX,
+                PositionY = item.PositionY,
+                Effects = item.Effects.Select(e => e.Clone()).ToList()
+            };
+            track.Clips.Add(clip);
+            pasted.Add(clip);
+        }
+
+        if (pasted.Count == 0) return 0;
+
+        ApplySelection(pasted.Select(c => c.Id), pasted[^1].Id);
+        NotifyTimelineChanged();
+        return pasted.Count;
+    }
+
+    private void ApplySelection(IEnumerable<Guid> ids, Guid? primary)
+    {
+        var list = new List<Guid>();
+        foreach (var id in ids)
+        {
+            if (!list.Contains(id) && FindClip(id) != null) list.Add(id);
+        }
+
+        _selectedClipId = primary is { } wanted && list.Contains(wanted)
+            ? wanted
+            : list.Count > 0 ? list[^1] : (Guid?)null;
+
+        _selectedClipIds.Clear();
+        _selectedClipIds.AddRange(list);
+
+        foreach (var track in Tracks)
+            foreach (var clip in track.Clips)
+                clip.IsSelected = _selectedClipIds.Contains(clip.Id);
+
+        OnPropertyChanged(nameof(SelectedClipId));
+        OnPropertyChanged(nameof(SelectedClip));
+        OnPropertyChanged(nameof(SelectionCount));
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     /// <summary>End of the last clip (0 when the timeline is empty).</summary>
     public double ContentDuration
@@ -183,11 +377,14 @@ public sealed class EditProject : ObservableObject
             var clips = track.Clips.Where(c => c.AssetId == asset.Id).ToList();
             foreach (var clip in clips)
             {
-                if (clip.Id == SelectedClipId) SelectedClipId = null;
+                _selectedClipIds.Remove(clip.Id);
                 track.Clips.Remove(clip);
             }
         }
         Assets.Remove(asset);
+        if (_selectedClipId is { } primary && !_selectedClipIds.Contains(primary))
+            _selectedClipId = _selectedClipIds.Count > 0 ? _selectedClipIds[^1] : null;
+        RefreshSelectionFlags();
         NotifyTimelineChanged();
     }
 
@@ -218,10 +415,16 @@ public sealed class EditProject : ObservableObject
         return track;
     }
 
+    /// <summary>
+    /// First layer that accepts this media and is not locked. Falls back to a
+    /// locked layer (so the caller can report it) and only then creates one.
+    /// </summary>
     public TimelineTrack EnsureTrack(MediaKind kind)
     {
         var trackKind = kind == MediaKind.Audio ? TrackKind.Audio : TrackKind.Video;
-        return Tracks.FirstOrDefault(t => t.Accepts(kind)) ?? AddTrack(trackKind);
+        return Tracks.FirstOrDefault(t => t.Accepts(kind) && !t.IsLocked)
+            ?? Tracks.FirstOrDefault(t => t.Accepts(kind))
+            ?? AddTrack(trackKind);
     }
 
     /// <summary>First clock position at or after <paramref name="desired"/> where the clip fits.</summary>
@@ -238,7 +441,7 @@ public sealed class EditProject : ObservableObject
 
     // ----------------------------------------------------------------- clips
 
-    public TimelineClip? AddClip(MediaAsset asset, double at, TimelineTrack? track = null)
+    public TimelineClip? AddClip(MediaAsset asset, double at, TimelineTrack? track = null, bool notify = true)
     {
         track ??= EnsureTrack(asset.Kind);
         if (!track.Accepts(asset.Kind)) track = EnsureTrack(asset.Kind);
@@ -260,7 +463,7 @@ public sealed class EditProject : ObservableObject
         };
         track.Clips.Add(clip);
         SelectedClipId = clip.Id;
-        NotifyTimelineChanged();
+        if (notify) NotifyTimelineChanged();
         return clip;
     }
 
@@ -394,7 +597,11 @@ public sealed class EditProject : ObservableObject
             CropTop = clip.CropTop,
             CropBottom = clip.CropBottom,
             PanX = clip.PanX,
-            PanY = clip.PanY
+            PanY = clip.PanY,
+            Scale = clip.Scale,
+            PositionX = clip.PositionX,
+            PositionY = clip.PositionY,
+            Effects = clip.Effects.Select(e => e.Clone()).ToList()
         };
 
         clip.DurationSeconds = splitAt - clip.StartSeconds;
@@ -406,13 +613,32 @@ public sealed class EditProject : ObservableObject
         return right;
     }
 
-    public bool SplitAtPlayhead()
+    /// <summary>True when at least one unlocked clip straddles the playhead.</summary>
+    public bool HasClipAtPlayhead() =>
+        Tracks.Any(t => !t.IsLocked && t.Clips.Any(c =>
+            Playhead > c.StartSeconds + FrameDuration * 0.5 &&
+            Playhead < c.EndSeconds - FrameDuration * 0.5));
+
+    /// <summary>
+    /// Splits every clip under the playhead on every unlocked layer, so a cut
+    /// lands on the picture and its audio together. Returns how many clips split.
+    /// </summary>
+    public int SplitAllAtPlayhead()
     {
-        var target = SelectedClip;
-        if (target == null || Playhead <= target.StartSeconds || Playhead >= target.EndSeconds)
-            target = GetPreviewClipAt(Playhead);
-        if (target == null) return false;
-        return SplitClip(target, Playhead) != null;
+        var split = 0;
+        foreach (var track in Tracks.ToList())
+        {
+            if (track.IsLocked) continue;
+
+            foreach (var clip in track.Clips.OrderBy(c => c.StartSeconds).ToList())
+            {
+                if (Playhead <= clip.StartSeconds + FrameDuration * 0.5) continue;
+                if (Playhead >= clip.EndSeconds - FrameDuration * 0.5) continue;
+                if (SplitClip(clip, Playhead) != null) split++;
+            }
+        }
+
+        return split;
     }
 
     /// <summary>
@@ -457,7 +683,11 @@ public sealed class EditProject : ObservableObject
             CropTop = clip.CropTop,
             CropBottom = clip.CropBottom,
             PanX = clip.PanX,
-            PanY = clip.PanY
+            PanY = clip.PanY,
+            Scale = clip.Scale,
+            PositionX = clip.PositionX,
+            PositionY = clip.PositionY,
+            Effects = clip.Effects.Select(e => e.Clone()).ToList()
         };
         track.Clips.Add(copy);
         SelectedClipId = copy.Id;
@@ -465,23 +695,248 @@ public sealed class EditProject : ObservableObject
         return copy;
     }
 
+    // ---------------------------------------------------------------- effects
+
+    /// <summary>Appends an effect to a clip with the catalog defaults.</summary>
+    public ClipEffect AddEffect(TimelineClip clip, EffectKind kind)
+    {
+        var effect = EffectCatalog.Create(kind);
+        clip.Effects.Add(effect);
+        NotifyTimelineChanged();
+        return effect;
+    }
+
+    public bool RemoveEffect(TimelineClip clip, ClipEffect effect)
+    {
+        if (!clip.Effects.Remove(effect)) return false;
+        NotifyTimelineChanged();
+        return true;
+    }
+
+    /// <summary>Moves an effect up (-1) or down (+1) in the stack.</summary>
+    public bool MoveEffect(TimelineClip clip, ClipEffect effect, int delta)
+    {
+        var index = clip.Effects.IndexOf(effect);
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= clip.Effects.Count) return false;
+
+        clip.Effects.RemoveAt(index);
+        clip.Effects.Insert(target, effect);
+        NotifyTimelineChanged();
+        return true;
+    }
+
+    /// <summary>Marks the project dirty after live effect parameter edits.</summary>
+    public void NotifyEffectChanged() => NotifyTimelineChanged();
+
     public bool DeleteClip(TimelineClip clip)
     {
         var track = TrackOf(clip);
         if (track == null || track.IsLocked) return false;
-        if (clip.Id == SelectedClipId) SelectedClipId = null;
+
+        _selectedClipIds.Remove(clip.Id);
+        if (_selectedClipId == clip.Id)
+            _selectedClipId = _selectedClipIds.Count > 0 ? _selectedClipIds[^1] : null;
         track.Clips.Remove(clip);
+        RefreshSelectionFlags();
         NotifyTimelineChanged();
         return true;
     }
 
     public bool DeleteSelectedClip() => SelectedClip != null && DeleteClip(SelectedClip);
 
+    /// <summary>Deletes every selected clip on an unlocked layer. Returns how many went.</summary>
+    public int DeleteSelectedClips()
+    {
+        var clips = SelectedClips()
+            .Where(c => TrackOf(c) is { IsLocked: false })
+            .ToList();
+        if (clips.Count == 0) return 0;
+
+        ApplySelection(Array.Empty<Guid>(), null);
+        foreach (var clip in clips) TrackOf(clip)?.Clips.Remove(clip);
+        NotifyTimelineChanged();
+        return clips.Count;
+    }
+
+    public int DeleteSelectedClipsAndCloseGaps()
+    {
+        var tracks = SelectedClips()
+            .Select(TrackOf)
+            .Where(t => t is { IsLocked: false })
+            .Cast<TimelineTrack>()
+            .Distinct()
+            .ToList();
+        if (tracks.Count == 0) return 0;
+
+        var deleted = DeleteSelectedClips();
+        foreach (var track in tracks) CloseGaps(track);
+        return deleted;
+    }
+
+    /// <summary>
+    /// Moves every selected clip by the same offset. The offset is limited so
+    /// the first clip cannot cross zero, which would desync the group.
+    /// </summary>
+    public int NudgeSelectedClips(double delta)
+    {
+        var clips = SelectedClips()
+            .Where(c => TrackOf(c) is { IsLocked: false })
+            .ToList();
+        if (clips.Count == 0) return 0;
+
+        var minStart = clips.Min(c => c.StartSeconds);
+        if (minStart + delta < 0) delta = -minStart;
+        if (Math.Abs(delta) < Epsilon) return 0;
+
+        foreach (var clip in clips)
+            clip.StartSeconds = ClampMove(clip, clip.StartSeconds + delta);
+
+        NotifyTimelineChanged();
+        return clips.Count;
+    }
+
+    /// <summary>
+    /// Deletes a clip and pulls the rest of its layer left by the clip length,
+    /// so the cut closes instead of leaving a hole.
+    /// </summary>
+    public bool DeleteClipAndCloseGap(TimelineClip clip)
+    {
+        var track = TrackOf(clip);
+        if (track == null || track.IsLocked) return false;
+
+        var start = clip.StartSeconds;
+        var duration = clip.DurationSeconds;
+        _selectedClipIds.Remove(clip.Id);
+        if (_selectedClipId == clip.Id)
+            _selectedClipId = _selectedClipIds.Count > 0 ? _selectedClipIds[^1] : null;
+        track.Clips.Remove(clip);
+        RefreshSelectionFlags();
+
+        foreach (var other in track.Clips.Where(c => c.StartSeconds >= start - Epsilon))
+            other.StartSeconds = Math.Max(0, other.StartSeconds - duration);
+
+        NotifyTimelineChanged();
+        return true;
+    }
+
+    /// <summary>Moves the next clip (and everything after it) back against this clip.</summary>
+    public bool CloseGapAfter(TimelineClip clip)
+    {
+        var track = TrackOf(clip);
+        if (track == null || track.IsLocked) return false;
+
+        var next = track.Clips
+            .Where(c => !ReferenceEquals(c, clip) && c.StartSeconds >= clip.EndSeconds - Epsilon)
+            .OrderBy(c => c.StartSeconds)
+            .FirstOrDefault();
+        if (next == null) return false;
+
+        var shift = next.StartSeconds - clip.EndSeconds;
+        if (shift <= FrameDuration * 0.5) return false;
+
+        foreach (var other in track.Clips.Where(c => c.StartSeconds >= next.StartSeconds - Epsilon))
+            other.StartSeconds = Math.Max(0, other.StartSeconds - shift);
+
+        NotifyTimelineChanged();
+        return true;
+    }
+
+    /// <summary>True when any clip on the layer starts after the previous one ends.</summary>
+    public bool HasGaps(TimelineTrack track)
+    {
+        var clips = track.Clips.OrderBy(c => c.StartSeconds).ToList();
+        if (clips.Count < 2) return false;
+
+        var cursor = clips[0].EndSeconds;
+        for (var i = 1; i < clips.Count; i++)
+        {
+            if (clips[i].StartSeconds > cursor + FrameDuration * 0.5) return true;
+            cursor = Math.Max(cursor, clips[i].EndSeconds);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Pulls every clip on a layer back against the previous one, closing gaps
+    /// without touching intentional overlaps (crossfades). Returns how many gaps
+    /// were closed.
+    /// </summary>
+    public int CloseGaps(TimelineTrack track)
+    {
+        if (track.IsLocked || !HasGaps(track)) return 0;
+
+        var clips = track.Clips
+            .OrderBy(c => c.StartSeconds)
+            .ThenBy(c => c.Id)
+            .ToList();
+        if (clips.Count < 2) return 0;
+
+        var closed = 0;
+        var cursor = clips[0].EndSeconds;
+        for (var i = 1; i < clips.Count; i++)
+        {
+            var clip = clips[i];
+            if (clip.StartSeconds > cursor + FrameDuration * 0.5)
+            {
+                clip.StartSeconds = SnapToFrame(cursor);
+                closed++;
+            }
+            cursor = Math.Max(cursor, clip.EndSeconds);
+        }
+
+        if (closed > 0) NotifyTimelineChanged();
+        return closed;
+    }
+
+    /// <summary>
+    /// Nearest clip edge (or timeline start/end) in a direction, used for
+    /// jumping the playhead between cuts. <paramref name="direction"/> is -1 or 1.
+    /// </summary>
+    public double? FindEditPoint(double from, int direction)
+    {
+        if (direction == 0) return null;
+
+        var best = direction > 0 ? double.MaxValue : double.MinValue;
+        var found = false;
+        var limit = FrameDuration * 0.25;
+
+        void Consider(double time)
+        {
+            if (direction > 0)
+            {
+                if (time <= from + limit || time >= best) return;
+            }
+            else
+            {
+                if (time >= from - limit || time <= best) return;
+            }
+
+            best = time;
+            found = true;
+        }
+
+        Consider(0);
+        Consider(ContentDuration);
+        foreach (var track in Tracks)
+            foreach (var clip in track.Clips)
+            {
+                Consider(clip.StartSeconds);
+                Consider(clip.EndSeconds);
+            }
+
+        return found ? best : null;
+    }
+
     public bool RemoveTrack(TimelineTrack track)
     {
         if (!Tracks.Contains(track)) return false;
-        if (SelectedClip != null && track.Clips.Contains(SelectedClip))
-            SelectedClipId = null;
+
+        foreach (var clip in track.Clips) _selectedClipIds.Remove(clip.Id);
+        if (_selectedClipId is { } primary && !_selectedClipIds.Contains(primary))
+            _selectedClipId = _selectedClipIds.Count > 0 ? _selectedClipIds[^1] : null;
+        RefreshSelectionFlags();
+
         Tracks.Remove(track);
         NotifyTimelineChanged();
         return true;
@@ -535,6 +990,9 @@ public sealed class EditProject : ObservableObject
 
     public void BeginEdit() => Undo.Capture(this);
 
+    /// <summary>Pushes a snapshot captured before a live-editing dialog opened.</summary>
+    public void BeginEdit(ProjectFile snapshot) => Undo.CaptureState(snapshot);
+
     public void NotifyTimelineChanged()
     {
         OnPropertyChanged(nameof(ContentDuration));
@@ -555,13 +1013,14 @@ public sealed class EditProject : ObservableObject
         TimelineChanged?.Invoke(this, EventArgs.Empty);
         SelectionChanged?.Invoke(this, EventArgs.Empty);
         PlayheadChanged?.Invoke(this, EventArgs.Empty);
+        RangeChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void RefreshSelectionFlags()
     {
         foreach (var track in Tracks)
             foreach (var clip in track.Clips)
-                clip.IsSelected = clip.Id == SelectedClipId;
+                clip.IsSelected = _selectedClipIds.Contains(clip.Id);
         OnPropertyChanged(nameof(SelectedClip));
     }
 
@@ -569,11 +1028,22 @@ public sealed class EditProject : ObservableObject
     /// Re-point selection after tracks were rebuilt (load / undo). Unlike the
     /// property setter this also refreshes the new clip instances' flags.
     /// </summary>
-    public void RestoreSelection(Guid? clipId)
+    public void RestoreSelection(Guid? clipId) =>
+        RestoreSelection(clipId is { } id ? new[] { id } : Array.Empty<Guid>(), clipId);
+
+    public void RestoreSelection(IReadOnlyList<Guid> clipIds, Guid? primary)
     {
-        _selectedClipId = FindClip(clipId)?.Id;
+        _selectedClipIds.Clear();
+        foreach (var id in clipIds)
+            if (FindClip(id) != null) _selectedClipIds.Add(id);
+
+        _selectedClipId = primary is { } wanted && _selectedClipIds.Contains(wanted)
+            ? wanted
+            : _selectedClipIds.Count > 0 ? _selectedClipIds[^1] : (Guid?)null;
+
         RefreshSelectionFlags();
         OnPropertyChanged(nameof(SelectedClipId));
+        OnPropertyChanged(nameof(SelectionCount));
     }
 
     private void OnTracksChanged(object? sender, NotifyCollectionChangedEventArgs e)

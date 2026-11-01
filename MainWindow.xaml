@@ -15,11 +15,10 @@
   </WindowChrome.WindowChrome>
 
   <Window.Resources>
-    <!-- ================================================================ rail -->
     <Style x:Key="RailButton" TargetType="ToggleButton">
       <Setter Property="Width" Value="38"/>
       <Setter Property="Height" Value="38"/>
-      <Setter Property="Margin" Value="0,0,0,3"/>
+      <Setter Property="Margin" Value="0,0,0,4"/>
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Foreground" Value="#6E8095"/>
       <Setter Property="Cursor" Value="Hand"/>
@@ -128,14 +127,16 @@
     </Style>
 
     <Style x:Key="ExportPill" TargetType="Button">
-      <Setter Property="Height" Value="25"/>
-      <Setter Property="Padding" Value="11,0"/>
-      <Setter Property="Margin" Value="0,7,10,0"/>
-      <Setter Property="Background" Value="#0F1824"/>
-      <Setter Property="BorderBrush" Value="#223248"/>
+      <Setter Property="Height" Value="26"/>
+      <Setter Property="Padding" Value="13,0"/>
+      <Setter Property="Margin" Value="0,0,10,0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Background" Value="#2E9BFF"/>
+      <Setter Property="BorderBrush" Value="#5FBBFF"/>
       <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="Foreground" Value="#8EA0B4"/>
+      <Setter Property="Foreground" Value="#04101C"/>
       <Setter Property="FontSize" Value="10.5"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
       <Setter Property="Template">
@@ -148,15 +149,15 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#16202D"/>
-                <Setter TargetName="Bd" Property="BorderBrush" Value="#2E4A66"/>
-                <Setter Property="Foreground" Value="#C7D6E6"/>
+                <Setter TargetName="Bd" Property="Background" Value="#4AACFF"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#8FD0FF"/>
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#1E2C3E"/>
+                <Setter TargetName="Bd" Property="Background" Value="#1F84E0"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#2E9BFF"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
-                <Setter TargetName="Bd" Property="Opacity" Value="0.8"/>
+                <Setter TargetName="Bd" Property="Opacity" Value="0.55"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -201,7 +202,11 @@
       <MenuItem Header="Undo" InputGestureText="Ctrl+Z" Click="Undo_Click"><MenuItem.Icon><Path Data="{StaticResource IconUndo}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <MenuItem Header="Redo" InputGestureText="Ctrl+Y" Click="Redo_Click"><MenuItem.Icon><Path Data="{StaticResource IconRedo}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <Separator/>
+      <MenuItem Header="Copy clips" InputGestureText="Ctrl+C" Click="CopyClips_Click"/>
+      <MenuItem Header="Paste clips" InputGestureText="Ctrl+V" Click="PasteClips_Click"/>
+      <Separator/>
       <MenuItem Header="Split at playhead" InputGestureText="S" Click="Split_Click"><MenuItem.Icon><Path Data="{StaticResource IconSplit}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
+      <MenuItem Header="Split all layers at playhead" InputGestureText="Shift+S" Click="SplitAll_Click"><MenuItem.Icon><Path Data="{StaticResource IconSplit}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <MenuItem Header="Duplicate clip" InputGestureText="Ctrl+D" Click="Duplicate_Click"><MenuItem.Icon><Path Data="{StaticResource IconDuplicate}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <MenuItem Header="Delete clip" InputGestureText="Del" Click="Delete_Click"><MenuItem.Icon><Path Data="{StaticResource IconDelete}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
     </ContextMenu>
@@ -210,6 +215,7 @@
       <MenuItem Header="Zoom in" InputGestureText="Ctrl+ +" Click="ZoomIn_Click"><MenuItem.Icon><Path Data="{StaticResource IconZoomIn}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <MenuItem Header="Zoom out" InputGestureText="Ctrl+ −" Click="ZoomOut_Click"><MenuItem.Icon><Path Data="{StaticResource IconZoomOut}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <MenuItem Header="Fit timeline" InputGestureText="F" Click="ZoomFit_Click"><MenuItem.Icon><Path Data="{StaticResource IconFit}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
+      <MenuItem Header="Zoom to selection" InputGestureText="Z" Click="ZoomSelection_Click"><MenuItem.Icon><Path Data="{StaticResource IconFit}" Stroke="#7FA6C8" StrokeThickness="1.3" Width="15" Height="15" Stretch="Uniform" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/></MenuItem.Icon></MenuItem>
       <Separator/>
       <MenuItem Header="Snap to edges" IsCheckable="True" IsChecked="True"
                 Click="SnapMenuItem_Click"/>
@@ -222,15 +228,15 @@
 
     <!-- ======================================================== media items -->
     <DataTemplate x:Key="MediaItemTemplate">
-      <Border Margin="0,0,0,3" Padding="8,7" CornerRadius="5" Background="Transparent">
+      <Border Margin="0,0,0,5" Padding="10,9" CornerRadius="5" Background="Transparent">
         <Grid>
           <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="62"/>
+            <ColumnDefinition Width="68"/>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
 
-          <Border Width="60" Height="40" CornerRadius="4" Background="#070B12"
+          <Border Width="66" Height="44" CornerRadius="4" Background="#070B12"
                   BorderBrush="#1A2636" BorderThickness="1" VerticalAlignment="Center"
                   ClipToBounds="True">
             <Grid>
@@ -241,8 +247,8 @@
             </Grid>
           </Border>
 
-          <StackPanel Grid.Column="1" Margin="11,0,8,0" VerticalAlignment="Center">
-            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+          <StackPanel Grid.Column="1" Margin="12,0,10,0" VerticalAlignment="Center">
+            <TextBlock Text="{Binding Name}" FontSize="12.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
                        ToolTip="{Binding FilePath}">
               <TextBlock.Style>
                 <Style TargetType="TextBlock">
@@ -255,13 +261,13 @@
                 </Style>
               </TextBlock.Style>
             </TextBlock>
-            <TextBlock Text="{Binding MetaLabel}" Foreground="#7A8EA4" FontSize="10"
-                       TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/>
+            <TextBlock Text="{Binding MetaLabel}" Foreground="#7A8EA4" FontSize="10.5"
+                       TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/>
           </StackPanel>
 
           <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="4,0,2,0">
             <Border Background="#0B121B" BorderBrush="#223248" BorderThickness="1"
-                    CornerRadius="4" Padding="6,2" HorizontalAlignment="Right">
+                    CornerRadius="4" Padding="7,3" HorizontalAlignment="Right">
               <TextBlock Text="{Binding DurationLabel}" Foreground="#DCE8F4"
                          FontFamily="Consolas, Segoe UI" FontSize="10.5" FontWeight="SemiBold"
                          HorizontalAlignment="Right"/>
@@ -336,9 +342,10 @@
                   ToolTip="Export video (Ctrl+E)" Click="Export_Click"
                   WindowChrome.IsHitTestVisibleInChrome="True">
             <StackPanel Orientation="Horizontal">
-              <TextBlock Text="Export" FontSize="10.5" Foreground="#8EA0B4" VerticalAlignment="Center"/>
+              <TextBlock Text="Export" FontSize="10.5" FontWeight="SemiBold" Foreground="#04101C"
+                         VerticalAlignment="Center"/>
               <Path Data="M12 17 V5 M7 10 L12 5 L17 10" Width="9" Height="9" Stretch="Uniform"
-                    Stroke="#5C6B7E" StrokeThickness="1.6" StrokeStartLineCap="Round"
+                    Stroke="#04101C" StrokeThickness="1.8" StrokeStartLineCap="Round"
                     StrokeEndLineCap="Round" StrokeLineJoin="Round" Margin="6,0,0,0"
                     VerticalAlignment="Center"/>
             </StackPanel>
@@ -368,39 +375,31 @@
 
       <!-- rail -->
       <Border Grid.Column="0" Background="#0D131D" BorderBrush="#1A2636" BorderThickness="0,0,1,0">
-        <Grid Margin="0,7">
+        <Grid Margin="0,7,0,9">
           <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
 
           <StackPanel Grid.Row="0" HorizontalAlignment="Center">
-            <ToggleButton x:Name="RailAll" Style="{StaticResource RailButton}" IsChecked="True"
-                          Click="RailFilter_Click" Tag="all" ToolTip="All media">
-              <Path Data="M3 7 H10 L12 9 H21 V19 H3 Z" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
-                    StrokeThickness="1.6" StrokeLineJoin="Round" Width="16" Height="16" Stretch="Uniform"/>
-            </ToggleButton>
-            <ToggleButton x:Name="RailVideo" Style="{StaticResource RailButton}" Click="RailFilter_Click"
-                          Tag="video" ToolTip="Video clips">
-              <Path Data="M3 6 H21 V18 H3 Z M8 6 V18 M16 6 V18 M3 12 H21"
+            <ToggleButton x:Name="RailMedia" Style="{StaticResource RailButton}" IsChecked="True"
+                          AutomationProperties.Name="Media library"
+                          Click="RailMedia_Click" ToolTip="Media library">
+              <Path Data="M3 7 H10 L12 9 H21 V19 H3 Z"
                     Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
-                    StrokeThickness="1.6" StrokeLineJoin="Round" Width="16" Height="16" Stretch="Uniform"/>
+                    StrokeThickness="1.6" StrokeLineJoin="Round" Width="16" Height="16"
+                    Stretch="Uniform"/>
             </ToggleButton>
-            <ToggleButton x:Name="RailAudio" Style="{StaticResource RailButton}" Click="RailFilter_Click"
-                          Tag="audio" ToolTip="Audio clips">
-              <Path Data="M9 18 V6 L20 4 V16 M9 18 A2.5 2.5 0 1 1 4 18 A2.5 2.5 0 1 1 9 18 M20 16 A2.5 2.5 0 1 1 15 16 A2.5 2.5 0 1 1 20 16"
-                    Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
-                    StrokeThickness="1.5" StrokeLineJoin="Round" Width="16" Height="16" Stretch="Uniform"/>
-            </ToggleButton>
-            <ToggleButton x:Name="RailImage" Style="{StaticResource RailButton}" Click="RailFilter_Click"
-                          Tag="image" ToolTip="Images">
-              <Path Data="M3 5 H21 V19 H3 Z M7 15 L11 11 L14 14 L17 11.5 L21 15.5 M8 9 A1 1 0 1 1 8 9.01"
-                    Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
-                    StrokeThickness="1.6" StrokeLineJoin="Round" Width="16" Height="16" Stretch="Uniform"/>
+            <ToggleButton x:Name="RailEffects" Style="{StaticResource RailButton}"
+                          AutomationProperties.Name="Effects"
+                          Click="RailEffects_Click" ToolTip="Effects for the selected clip">
+              <TextBlock Text="fx" FontFamily="Consolas, Segoe UI" FontSize="15"
+                         FontStyle="Italic" FontWeight="Bold" VerticalAlignment="Center"/>
             </ToggleButton>
           </StackPanel>
 
-          <Button Grid.Row="1" Style="{StaticResource GhostButton}" Width="38" Height="38" Padding="0"
+          <Button Grid.Row="2" Style="{StaticResource GhostButton}" Width="38" Height="38" Padding="0"
                   HorizontalAlignment="Center" Click="Settings_Click" ToolTip="Settings">
             <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="13"
                        Foreground="#8EA0B4"/>
@@ -426,35 +425,33 @@
           </Grid.ColumnDefinitions>
 
           <!-- media library -->
-          <Border Grid.Column="0" Background="#0C0D10" BorderBrush="#141E2A" BorderThickness="0,0,1,0">
+          <Border x:Name="MediaLibraryPanel" Grid.Column="0" Background="#0D131D"
+                  BorderBrush="#141E2A" BorderThickness="0,0,1,0">
             <Grid>
               <Grid.RowDefinitions>
-                <RowDefinition Height="36"/>
-                <RowDefinition Height="31"/>
-                <RowDefinition Height="27"/>
+                <RowDefinition Height="44"/>
+                <RowDefinition Height="38"/>
+                <RowDefinition Height="34"/>
                 <RowDefinition Height="*"/>
-                <RowDefinition Height="22"/>
+                <RowDefinition Height="28"/>
               </Grid.RowDefinitions>
 
-              <Grid Grid.Row="0" Margin="12,0,8,0">
+              <Grid Grid.Row="0" Margin="14,0,10,0">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                   <TextBlock Text="MEDIA LIBRARY" FontSize="10" FontWeight="SemiBold" Foreground="#C7D6E6"/>
                   <TextBlock x:Name="LibraryCountText" Text="0" Foreground="#4E6075" FontFamily="Consolas, Segoe UI"
-                             FontSize="9.5" Margin="7,0,0,0" VerticalAlignment="Center"/>
+                             FontSize="9.5" Margin="8,0,0,0" VerticalAlignment="Center"/>
                 </StackPanel>
-                <Button Style="{StaticResource BaseButton}" HorizontalAlignment="Right" Padding="9,3"
-                        FontSize="10" Click="ImportMedia_Click" ToolTip="Import media (Ctrl+I)">
-                  <StackPanel Orientation="Horizontal">
-                    <Path Data="M12 4 V15 M7 10 L12 15 L17 10 M4 19 H20" Width="11" Height="11"
-                          Stretch="Uniform" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
-                          StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                          StrokeLineJoin="Round" VerticalAlignment="Center"/>
-                    <TextBlock Text="Import" Margin="5,0,0,0" FontSize="10" VerticalAlignment="Center"/>
-                  </StackPanel>
+                <Button Style="{StaticResource IconButton}" HorizontalAlignment="Right" VerticalAlignment="Center"
+                        Width="28" Height="28" Click="ImportMedia_Click" ToolTip="Import media (Ctrl+I)">
+                  <Path Data="M12 4 V15 M7 10 L12 15 L17 10 M4 19 H20" Width="13" Height="13"
+                        Stretch="Uniform" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                        StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                        StrokeLineJoin="Round" VerticalAlignment="Center"/>
                 </Button>
               </Grid>
 
-              <Grid Grid.Row="1" Margin="10,0,10,3">
+              <Grid Grid.Row="1" Margin="12,0,12,4">
                 <TextBox x:Name="SearchBox" Style="{StaticResource SearchBox}" TextChanged="SearchBox_TextChanged"/>
                 <TextBlock Text="Filter media…" Foreground="#4E6075" FontSize="10.5" Margin="9,0,0,0"
                            IsHitTestVisible="False" VerticalAlignment="Center">
@@ -471,7 +468,7 @@
                 </TextBlock>
               </Grid>
 
-              <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="8,0,8,4">
+              <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="10,0,10,6" VerticalAlignment="Center">
                 <ToggleButton x:Name="ChipAll" Style="{StaticResource ChipToggle}" Content="All"
                               IsChecked="True" Tag="all" Click="ChipFilter_Click"/>
                 <ToggleButton x:Name="ChipVideo" Style="{StaticResource ChipToggle}" Content="Video"
@@ -482,25 +479,35 @@
                               Tag="image" Click="ChipFilter_Click"/>
               </StackPanel>
 
-              <ListBox x:Name="MediaList" Grid.Row="3" Margin="6,0,4,0" ItemTemplate="{StaticResource MediaItemTemplate}"
+              <ListBox x:Name="MediaList" Grid.Row="3" Margin="8,0,6,0" ItemTemplate="{StaticResource MediaItemTemplate}"
+                       SelectionMode="Extended"
                        MouseDoubleClick="MediaList_MouseDoubleClick"
                        SelectionChanged="MediaList_SelectionChanged"
                        PreviewMouseLeftButtonDown="MediaList_PreviewMouseLeftButtonDown"
+                       PreviewMouseRightButtonDown="MediaList_PreviewMouseRightButtonDown"
                        PreviewMouseMove="MediaList_PreviewMouseMove"
                        AllowDrop="True" Drop="MediaList_Drop"
                        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                 <ListBox.ContextMenu>
                   <ContextMenu>
                     <MenuItem Header="Add to timeline" Click="AddSelectedAsset_Click"/>
+                    <MenuItem Header="Relink media…" Click="RelinkSelectedAsset_Click"/>
                     <MenuItem Header="Remove from library" Click="RemoveSelectedAsset_Click"/>
                   </ContextMenu>
                 </ListBox.ContextMenu>
               </ListBox>
 
-              <TextBlock x:Name="LibraryHintText" Grid.Row="4" Text="Double-click a clip to add it at the playhead"
-                         Foreground="#3F4F63" FontSize="9.5" Margin="12,0,8,0" VerticalAlignment="Center"
+              <TextBlock x:Name="LibraryHintText" Grid.Row="4" Text="Double-click to add · Ctrl/Shift-click to select several · Enter adds them"
+                         Foreground="#3F4F63" FontSize="9.5" Margin="14,0,10,0" VerticalAlignment="Center"
                          TextTrimming="CharacterEllipsis"/>
             </Grid>
+          </Border>
+
+          <!-- effects inspector (same slot as the media library) -->
+          <Border x:Name="EffectsPanelBorder" Grid.Column="0" Background="#0D131D"
+                  BorderBrush="#141E2A" BorderThickness="0,0,1,0"
+                  Visibility="Collapsed">
+            <controls:EffectsPanel x:Name="EffectsHost"/>
           </Border>
 
           <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="#090A0C"
@@ -544,6 +551,10 @@
                     <TextBlock x:Name="PreviewPlaceholderHint"
                                Text="Add media to the timeline, then move the playhead over it."
                                Foreground="#36465A" FontSize="9.5" Margin="0,4,0,0" HorizontalAlignment="Center"/>
+                    <Button x:Name="PreviewRelinkButton" Style="{StaticResource BaseButton}"
+                            Content="Locate file…" Padding="12,4" Margin="0,12,0,0"
+                            HorizontalAlignment="Center" Visibility="Collapsed"
+                            Click="PreviewRelink_Click"/>
                   </StackPanel>
                 </Grid>
               </Grid>

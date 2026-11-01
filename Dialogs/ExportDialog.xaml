@@ -13,6 +13,27 @@
       <Setter Property="Margin" Value="0,0,0,5"/>
     </Style>
 
+    <Style x:Key="ExportProgressBar" TargetType="ProgressBar">
+      <Setter Property="Height" Value="4"/>
+      <Setter Property="Minimum" Value="0"/>
+      <Setter Property="Maximum" Value="1"/>
+      <Setter Property="Background" Value="#111A27"/>
+      <Setter Property="Foreground" Value="#2E9BFF"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ProgressBar">
+            <Border Background="{TemplateBinding Background}">
+              <Grid x:Name="PART_Track">
+                <Rectangle x:Name="PART_Indicator" HorizontalAlignment="Left"
+                           Fill="{TemplateBinding Foreground}"/>
+              </Grid>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="ExportCard" TargetType="RadioButton">
       <Setter Property="Foreground" Value="#E6EEF6"/>
       <Setter Property="Cursor" Value="Hand"/>
@@ -111,16 +132,18 @@
       </Grid>
     </StackPanel>
 
-    <TextBlock Grid.Row="3"
-               Text="Renders all video layers with their opacity and crossfades, and mixes the audible clips."
-               Foreground="#5C6B7E" FontSize="9.5" Margin="0,8,0,0" TextWrapping="Wrap"/>
+    <StackPanel Grid.Row="3" Margin="0,8,0,0">
+      <TextBlock Text="Renders all video layers with their opacity and crossfades, and mixes the audible clips."
+                 Foreground="#5C6B7E" FontSize="9.5" TextWrapping="Wrap"/>
+      <TextBlock x:Name="RangeText" Foreground="#7A8EA4" FontSize="9.5" Margin="0,4,0,0"
+                 TextWrapping="Wrap"/>
+    </StackPanel>
 
     <StackPanel Grid.Row="4" Margin="0,12,0,0">
       <TextBlock x:Name="ErrorText" Foreground="#F87171" FontSize="10.5" TextWrapping="Wrap"
                  Visibility="Collapsed" MaxHeight="70"/>
       <StackPanel x:Name="ProgressPanel" Visibility="Collapsed" Margin="0,2,0,0">
-        <ProgressBar Height="4" IsIndeterminate="True" Background="#111A27" Foreground="#2E9BFF"
-                     BorderThickness="0"/>
+        <ProgressBar x:Name="ProgressBar" Style="{StaticResource ExportProgressBar}"/>
         <TextBlock x:Name="ProgressText" Text="Preparing…" Foreground="#8EA0B4" FontSize="10"
                    Margin="0,6,0,0"/>
       </StackPanel>

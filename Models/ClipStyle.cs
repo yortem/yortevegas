@@ -18,7 +18,11 @@ public sealed class ClipStyle
     public double CropBottom { get; init; }
     public double PanX { get; init; }
     public double PanY { get; init; }
+    public double Scale { get; init; } = 1;
+    public double PositionX { get; init; }
+    public double PositionY { get; init; }
     public FadeCurveKind FadeCurve { get; init; } = FadeCurveKind.Linear;
+    public IReadOnlyList<ClipEffect> Effects { get; init; } = Array.Empty<ClipEffect>();
 
     public static ClipStyle From(TimelineClip clip) => new()
     {
@@ -32,7 +36,11 @@ public sealed class ClipStyle
         CropBottom = clip.CropBottom,
         PanX = clip.PanX,
         PanY = clip.PanY,
-        FadeCurve = clip.FadeCurve
+        Scale = clip.Scale,
+        PositionX = clip.PositionX,
+        PositionY = clip.PositionY,
+        FadeCurve = clip.FadeCurve,
+        Effects = clip.Effects.Select(e => e.Clone()).ToList()
     };
 
     public void ApplyTo(TimelineClip clip)
@@ -51,6 +59,10 @@ public sealed class ClipStyle
         clip.CropBottom = Math.Clamp(1 - clip.CropTop - height, 0, 0.45);
         clip.PanX = PanX;
         clip.PanY = PanY;
+        clip.Scale = Scale;
+        clip.PositionX = PositionX;
+        clip.PositionY = PositionY;
+        clip.Effects = Effects.Select(e => e.Clone()).ToList();
     }
 }
 

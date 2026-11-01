@@ -22,9 +22,12 @@ public sealed class UndoService
     public event EventHandler? StateChanged;
 
     /// <summary>Record the pre-mutation state. Clears the redo stack.</summary>
-    public void Capture(EditProject project)
+    public void Capture(EditProject project) => CaptureState(ProjectService.Capture(project));
+
+    /// <summary>Record an already-captured snapshot (used when a dialog is armed).</summary>
+    public void CaptureState(ProjectFile state)
     {
-        _undo.AddFirst(new Entry(ProjectService.Capture(project)));
+        _undo.AddFirst(new Entry(state));
         while (_undo.Count > Limit) _undo.RemoveLast();
         _redo.Clear();
         StateChanged?.Invoke(this, EventArgs.Empty);
