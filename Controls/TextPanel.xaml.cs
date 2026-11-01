@@ -7,7 +7,6 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Threading;
 using YorteVegas.Models;
 using YorteVegas.Services;
 using YorteVegas.ViewModels;
@@ -25,7 +24,6 @@ public partial class TextPanel : UserControl
     private TimelineClip? _clip;
     private TextOverlay _draft = TextCatalog.CreateDefault("Your text");
     private bool _building;
-    private readonly DispatcherTimer _previewTimer;
 
     /// <summary>Raised after any live edit to the current text style.</summary>
     public event EventHandler? Changed;
@@ -39,13 +37,6 @@ public partial class TextPanel : UserControl
     public TextPanel()
     {
         InitializeComponent();
-
-        _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
-        _previewTimer.Tick += (_, _) =>
-        {
-            _previewTimer.Stop();
-            RenderPreview();
-        };
     }
 
     public TimelineClip? EditedClip => _clip;
@@ -76,7 +67,6 @@ public partial class TextPanel : UserControl
         UpdateHeader();
         RebuildPresets();
         RebuildParams();
-        RenderPreview();
     }
 
     private void UpdateHeader()
@@ -86,8 +76,8 @@ public partial class TextPanel : UserControl
         RemoveButton.Visibility = _clip != null ? Visibility.Visible : Visibility.Collapsed;
         AddButton.Content = _clip != null ? "Add another" : "Add to timeline";
         DurationText.Text = _clip != null
-            ? $"{_clip.DurationSeconds:0.0} s on the timeline"
-            : "Will be 4.0 s on the timeline";
+            ? $"{_clip.DurationSeconds:0.0} s"
+            : "4.0 s default";
     }
 
     // ------------------------------------------------------------- presets
@@ -207,7 +197,6 @@ public partial class TextPanel : UserControl
 
         RebuildPresets();
         RebuildParams();
-        RenderPreview();
         CommitDraft();
     }
 
@@ -215,113 +204,85 @@ public partial class TextPanel : UserControl
 
     private void RebuildParams()
     {
-        ParamHost.Children.Clear();
+        ParamLeft.Children.Clear();
+        ParamRight.Children.Clear();
         if (_draft == null) return;
 
         _building = true;
         try
         {
-            if (_clip != null)
-            {
-                AddSlider(ParamHost, "Duration", 0.5, 30, 0.1,
-                    _clip.DurationSeconds, "0.0", value =>
-                    {
-                        _clip.DurationSeconds = Math.Max(0.1, value);
-                        DurationText.Text = $"{_clip.DurationSeconds:0.0} s on the timeline";
-                    }, " s");
-            }
-
-            AddFontFamily();
-            AddSlider(ParamHost, "Font size", 12, 220, 1, _draft.FontSize, "0",
+            AddSection(ParamLeft, "Font");
+            AddFontFamily(ParamLeft);
+            AddSlider(ParamLeft, "Size", 12, 220, 1, _draft.FontSize, "0",
                 value => _draft.FontSize = value);
+            AddWeight(ParamLeft);
 
-            AddChoices(ParamHost, "Weight", new[]
-            {
-                ("Light", 300d), ("Regular", 400d), ("SemiBold", 600d),
-                ("Bold", 700d), ("Black", 900d)
-            }, _draft.Weight, value => _draft.Weight = (int)Math.Round(value));
+            AddSection(ParamLeft, "Style");
+            AddStyleRow(ParamLeft);
+            AddDirection(ParamLeft);
+            AddColorSwatches(ParamLeft, "Color", _draft.Color, value => _draft.Color = value);
 
-            AddToggle(ParamHost, "Italic", _draft.Italic, value => _draft.Italic = value);
-
-            AddColorSwatches(ParamHost, "Color", _draft.Color,
-                value => _draft.Color = value);
-
-            AddChoices(ParamHost, "Alignment", new[]
-            {
-                ("Left", (double)TextAlign.Left),
-                ("Center", (double)TextAlign.Center),
-                ("Right", (double)TextAlign.Right)
-            }, (double)_draft.Align, value => _draft.Align = (TextAlign)(int)Math.Round(value));
-
-            AddChoices(ParamHost, "Direction", new[]
-            {
-                ("Auto", (double)TextDirection.Auto),
-                ("LTR", (double)TextDirection.Ltr),
-                ("RTL", (double)TextDirection.Rtl)
-            }, (double)_draft.Direction, value =>
-            {
-                _draft.Direction = (TextDirection)(int)Math.Round(value);
-                UpdateInputDirection();
-                RebuildPresets();
-            });
-
-            AddSlider(ParamHost, "Position X", 0, 1, 0.01, _draft.PositionX, "0.00",
+            AddSection(ParamLeft, "Position");
+            AddSlider(ParamLeft, "X", 0, 1, 0.01, _draft.PositionX, "0.00",
                 value => _draft.PositionX = value);
-            AddSlider(ParamHost, "Position Y", 0, 1, 0.01, _draft.PositionY, "0.00",
+            AddSlider(ParamLeft, "Y", 0, 1, 0.01, _draft.PositionY, "0.00",
                 value => _draft.PositionY = value);
-            AddSlider(ParamHost, "Max width", 0.2, 1, 0.01, _draft.MaxWidth, "0.00",
+            AddSlider(ParamLeft, "Width", 0.2, 1, 0.01, _draft.MaxWidth, "0.00",
                 value => _draft.MaxWidth = value);
 
-            AddToggle(ParamHost, "Shadow", _draft.Shadow,
+            AddSection(ParamRight, "Clip");
+            if (_clip != null)
+            {
+                AddSlider(ParamRight, "Duration", 0.5, 30, 0.1, _clip.DurationSeconds, "0.0",
+                    value =>
+                    {
+                        _clip.DurationSeconds = Math.Max(0.1, value);
+                        DurationText.Text = $"{_clip.DurationSeconds:0.0} s";
+                    }, " s");
+            }
+            else
+            {
+                AddInfo(ParamRight, "4.0 s when added");
+            }
+
+            AddSectionToggle(ParamRight, "Shadow", _draft.Shadow,
                 value => _draft.Shadow = value, RebuildParams);
             if (_draft.Shadow)
             {
-                AddSlider(ParamHost, "Shadow blur", 0, 40, 0.5, _draft.ShadowBlur, "0.0",
+                AddSlider(ParamRight, "Blur", 0, 40, 0.5, _draft.ShadowBlur, "0.0",
                     value => _draft.ShadowBlur = value);
-                AddSlider(ParamHost, "Shadow opacity", 0, 1, 0.01, _draft.ShadowOpacity, "0.00",
+                AddSlider(ParamRight, "Opacity", 0, 1, 0.01, _draft.ShadowOpacity, "0.00",
                     value => _draft.ShadowOpacity = value);
-                AddSlider(ParamHost, "Shadow depth", 0, 30, 0.5, _draft.ShadowDepth, "0.0",
+                AddSlider(ParamRight, "Depth", 0, 30, 0.5, _draft.ShadowDepth, "0.0",
                     value => _draft.ShadowDepth = value);
             }
 
-            AddToggle(ParamHost, "Outline", _draft.Outline,
+            AddSectionToggle(ParamRight, "Outline", _draft.Outline,
                 value => _draft.Outline = value, RebuildParams);
             if (_draft.Outline)
             {
-                AddSlider(ParamHost, "Outline width", 0.5, 12, 0.1,
+                AddSlider(ParamRight, "Width", 0.5, 12, 0.1,
                     _draft.OutlineThickness, "0.0", value => _draft.OutlineThickness = value);
-                AddColorSwatches(ParamHost, "Outline color", _draft.OutlineColor,
+                AddColorSwatches(ParamRight, "Color", _draft.OutlineColor,
                     value => _draft.OutlineColor = value);
             }
 
-            AddToggle(ParamHost, "Background bar", _draft.Background,
+            AddSectionToggle(ParamRight, "Bar", _draft.Background,
                 value => _draft.Background = value, RebuildParams);
             if (_draft.Background)
             {
-                AddSlider(ParamHost, "Bar opacity", 0, 1, 0.01,
+                AddSlider(ParamRight, "Opacity", 0, 1, 0.01,
                     _draft.BackgroundOpacity, "0.00", value => _draft.BackgroundOpacity = value);
-                AddSlider(ParamHost, "Bar padding", 0, 60, 1,
+                AddSlider(ParamRight, "Pad", 0, 60, 1,
                     _draft.BackgroundPadding, "0", value => _draft.BackgroundPadding = value);
-                AddColorSwatches(ParamHost, "Bar color", _draft.BackgroundColor,
+                AddColorSwatches(ParamRight, "Color", _draft.BackgroundColor,
                     value => _draft.BackgroundColor = value);
             }
 
-            AddChoices(ParamHost, "Animation", new[]
-            {
-                ("None", (double)TextAnimation.None),
-                ("Fade", (double)TextAnimation.Fade),
-                ("Slide up", (double)TextAnimation.SlideUp),
-                ("Slide left", (double)TextAnimation.SlideLeft),
-                ("Zoom", (double)TextAnimation.Zoom),
-                ("Wipe", (double)TextAnimation.Wipe)
-            }, (double)_draft.Animation,
-                value => _draft.Animation = (TextAnimation)(int)Math.Round(value));
-
-            if (_draft.Animation != TextAnimation.None)
-            {
-                AddSlider(ParamHost, "Animation time", 0.1, 3, 0.05,
-                    _draft.AnimationSeconds, "0.00", value => _draft.AnimationSeconds = value, " s");
-            }
+            AddSection(ParamRight, "Animation");
+            AddAnimation(ParamRight);
+            AddSlider(ParamRight, "Time", 0.1, 3, 0.05,
+                _draft.AnimationSeconds, "0.00", value => _draft.AnimationSeconds = value, " s");
         }
         finally
         {
@@ -329,15 +290,83 @@ public partial class TextPanel : UserControl
         }
     }
 
-    private void AddFontFamily()
+    private void AddSection(Panel host, string title)
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
-        panel.Children.Add(new TextBlock
+        host.Children.Add(new TextBlock
+        {
+            Text = title.ToUpperInvariant(),
+            FontSize = 8.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x5C, 0x6B, 0x7E)),
+            Margin = new Thickness(0, 8, 0, 5)
+        });
+    }
+
+    private void AddSectionToggle(Panel host, string title, bool value,
+        Action<bool> setter, Action? rebuild = null)
+    {
+        var row = new Grid { Margin = new Thickness(0, 8, 0, 5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var label = new TextBlock
+        {
+            Text = title.ToUpperInvariant(),
+            FontSize = 8.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x5C, 0x6B, 0x7E)),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var toggle = new ToggleButton
+        {
+            Style = (Style)FindResource("ChoiceChip"),
+            Content = value ? "ON" : "OFF",
+            FontSize = 8.5,
+            Padding = new Thickness(6, 1, 6, 1),
+            Margin = new Thickness(0),
+            IsChecked = value
+        };
+        toggle.Click += (_, _) =>
+        {
+            if (_building) return;
+            var on = toggle.IsChecked == true;
+            toggle.Content = on ? "ON" : "OFF";
+            setter(on);
+            CommitDraft();
+            rebuild?.Invoke();
+        };
+
+        Grid.SetColumn(toggle, 1);
+        row.Children.Add(label);
+        row.Children.Add(toggle);
+        host.Children.Add(row);
+    }
+
+    private void AddInfo(Panel host, string text)
+    {
+        host.Children.Add(new TextBlock
+        {
+            Text = text,
+            FontSize = 9.5,
+            Foreground = new SolidColorBrush(Color.FromRgb(0x5C, 0x6B, 0x7E)),
+            Margin = new Thickness(66, 0, 0, 6)
+        });
+    }
+
+    private void AddFontFamily(Panel host)
+    {
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(66) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var label = new TextBlock
         {
             Style = (Style)FindResource("ParamLabel"),
             Text = "Font",
-            Margin = new Thickness(0, 0, 0, 4)
-        });
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center
+        };
 
         var fonts = TextCatalog.FontFamilies.ToList();
         if (!fonts.Any(f => string.Equals(f, _draft.FontFamily,
@@ -350,7 +379,10 @@ public partial class TextPanel : UserControl
         {
             ItemsSource = fonts,
             SelectedItem = _draft.FontFamily,
-            Margin = new Thickness(0, 0, 0, 0)
+            FontSize = 10,
+            Height = 24,
+            Padding = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(0)
         };
         combo.SelectionChanged += (_, _) =>
         {
@@ -358,37 +390,79 @@ public partial class TextPanel : UserControl
             if (combo.SelectedItem is not string family) return;
             _draft.FontFamily = family;
             CommitDraft();
-            SchedulePreview();
         };
 
-        panel.Children.Add(combo);
-        ParamHost.Children.Add(panel);
+        Grid.SetColumn(combo, 1);
+        row.Children.Add(label);
+        row.Children.Add(combo);
+        host.Children.Add(row);
+    }
+
+    private void AddWeight(Panel host)
+    {
+        var row = CreateLabelRow("Weight", out var label);
+        var labels = new List<string> { "Light", "Regular", "SemiBold", "Bold", "Black" };
+        var values = new[] { 300, 400, 600, 700, 900 };
+
+        var selected = Array.IndexOf(values, _draft.Weight);
+        if (selected < 0) selected = 1;
+
+        var combo = new ComboBox
+        {
+            ItemsSource = labels,
+            SelectedIndex = selected,
+            FontSize = 10,
+            Height = 24,
+            Padding = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(0)
+        };
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (_building) return;
+            var index = combo.SelectedIndex;
+            if (index < 0 || index >= values.Length) return;
+            _draft.Weight = values[index];
+            CommitDraft();
+        };
+
+        Grid.SetColumn(combo, 1);
+        row.Children.Add(combo);
+        host.Children.Add(row);
+    }
+
+    private Grid CreateLabelRow(string text, out TextBlock label)
+    {
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(66) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        label = new TextBlock
+        {
+            Style = (Style)FindResource("ParamLabel"),
+            Text = text,
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        row.Children.Add(label);
+        return row;
     }
 
     private void AddSlider(Panel host, string label, double min, double max, double step,
         double value, string format, Action<double> setter, string suffix = "")
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 9) };
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(66) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(46) });
 
-        var head = new Grid();
-        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var valueText = new TextBlock
-        {
-            Style = (Style)FindResource("ParamValue"),
-            Text = value.ToString(format, CultureInfo.InvariantCulture) + suffix
-        };
         var labelText = new TextBlock
         {
             Style = (Style)FindResource("ParamLabel"),
-            Text = label
+            Text = label,
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
-
-        Grid.SetColumn(valueText, 1);
-        head.Children.Add(labelText);
-        head.Children.Add(valueText);
-        panel.Children.Add(head);
 
         var slider = new Slider
         {
@@ -400,7 +474,19 @@ public partial class TextPanel : UserControl
             LargeChange = step * 10,
             TickFrequency = step,
             IsSnapToTickEnabled = true,
-            Margin = new Thickness(0, 2, 0, 0)
+            Height = 20,
+            Margin = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var valueText = new TextBlock
+        {
+            Style = (Style)FindResource("ParamValue"),
+            Text = value.ToString(format, CultureInfo.InvariantCulture) + suffix,
+            FontSize = 9.5,
+            Width = 46,
+            TextAlignment = TextAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
         };
 
         slider.ValueChanged += (_, e) =>
@@ -410,133 +496,169 @@ public partial class TextPanel : UserControl
             setter(newValue);
             valueText.Text = newValue.ToString(format, CultureInfo.InvariantCulture) + suffix;
             CommitDraft();
-            SchedulePreview();
         };
 
-        panel.Children.Add(slider);
-
-        var range = new Grid { Margin = new Thickness(2, 1, 2, 0) };
-        range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var minText = new TextBlock
-        {
-            Style = (Style)FindResource("ParamRange"),
-            Text = min.ToString(format, CultureInfo.InvariantCulture)
-        };
-        var maxText = new TextBlock
-        {
-            Style = (Style)FindResource("ParamRange"),
-            Text = max.ToString(format, CultureInfo.InvariantCulture),
-            HorizontalAlignment = HorizontalAlignment.Right
-        };
-        Grid.SetColumn(maxText, 1);
-        range.Children.Add(minText);
-        range.Children.Add(maxText);
-        panel.Children.Add(range);
-
-        host.Children.Add(panel);
+        Grid.SetColumn(slider, 1);
+        Grid.SetColumn(valueText, 2);
+        row.Children.Add(labelText);
+        row.Children.Add(slider);
+        row.Children.Add(valueText);
+        host.Children.Add(row);
     }
 
-    private void AddChoices(Panel host, string label,
-        IReadOnlyList<(string Label, double Value)> choices,
-        double current, Action<double> setter)
+    private void AddStyleRow(Panel host)
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 9) };
-        panel.Children.Add(new TextBlock
-        {
-            Style = (Style)FindResource("ParamLabel"),
-            Text = label,
-            Margin = new Thickness(0, 0, 0, 4)
-        });
+        var row = CreateLabelRow("Style", out _);
 
-        var wrap = new WrapPanel();
-        var chips = new List<ToggleButton>();
-
-        foreach (var choice in choices)
-        {
-            var chip = new ToggleButton
-            {
-                Style = (Style)FindResource("ChoiceChip"),
-                Content = choice.Label,
-                IsChecked = Math.Abs(choice.Value - current) < 0.001
-            };
-            chip.Click += (_, _) =>
-            {
-                if (_building) return;
-                setter(choice.Value);
-                foreach (var other in chips)
-                    other.IsChecked = ReferenceEquals(other, chip);
-                CommitDraft();
-                SchedulePreview();
-            };
-            chips.Add(chip);
-            wrap.Children.Add(chip);
-        }
-
-        panel.Children.Add(wrap);
-        host.Children.Add(panel);
-    }
-
-    private void AddToggle(Panel host, string label, bool value,
-        Action<bool> setter, Action? rebuild = null)
-    {
-        var panel = new StackPanel
+        var wrap = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Margin = new Thickness(0, 0, 0, 9)
+            VerticalAlignment = VerticalAlignment.Center
         };
 
-        var labelText = new TextBlock
-        {
-            Style = (Style)FindResource("ParamLabel"),
-            Text = label,
-            Width = 120
-        };
-
-        var toggle = new ToggleButton
+        var italic = new ToggleButton
         {
             Style = (Style)FindResource("ChoiceChip"),
-            Content = value ? "ON" : "OFF",
-            IsChecked = value,
-            Margin = new Thickness(0, 0, 0, 0)
+            Content = "I",
+            FontStyle = FontStyles.Italic,
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 10,
+            Width = 26,
+            Height = 24,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, 0, 6, 0),
+            IsChecked = _draft.Italic,
+            ToolTip = "Italic"
         };
-        toggle.Click += (_, _) =>
+        italic.Click += (_, _) =>
         {
             if (_building) return;
-            var on = toggle.IsChecked == true;
-            toggle.Content = on ? "ON" : "OFF";
-            setter(on);
+            _draft.Italic = italic.IsChecked == true;
             CommitDraft();
-            SchedulePreview();
-            rebuild?.Invoke();
+        };
+        wrap.Children.Add(italic);
+
+        var combo = new ComboBox
+        {
+            ItemsSource = new List<string> { "Left", "Center", "Right" },
+            SelectedIndex = (int)_draft.Align,
+            FontSize = 9.5,
+            Height = 24,
+            Width = 112,
+            Padding = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(0)
+        };
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (_building) return;
+            var index = combo.SelectedIndex;
+            if (index < 0 || index > 2) return;
+            _draft.Align = (TextAlign)index;
+            CommitDraft();
+        };
+        wrap.Children.Add(combo);
+
+        Grid.SetColumn(wrap, 1);
+        row.Children.Add(wrap);
+        host.Children.Add(row);
+    }
+
+    private void AddDirection(Panel host)
+    {
+        var row = CreateLabelRow("Dir", out _);
+        var labels = new List<string> { "Auto", "LTR", "RTL" };
+        var values = new[] { TextDirection.Auto, TextDirection.Ltr, TextDirection.Rtl };
+        var selected = Array.IndexOf(values, _draft.Direction);
+        if (selected < 0) selected = 0;
+
+        var combo = new ComboBox
+        {
+            ItemsSource = labels,
+            SelectedIndex = selected,
+            FontSize = 9.5,
+            Height = 24,
+            Padding = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(0)
+        };
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (_building) return;
+            var index = combo.SelectedIndex;
+            if (index < 0 || index >= values.Length) return;
+            _draft.Direction = values[index];
+            UpdateInputDirection();
+            RebuildPresets();
+            CommitDraft();
         };
 
-        panel.Children.Add(labelText);
-        panel.Children.Add(toggle);
-        host.Children.Add(panel);
+        Grid.SetColumn(combo, 1);
+        row.Children.Add(combo);
+        host.Children.Add(row);
+    }
+
+    private void AddAnimation(Panel host)
+    {
+        var row = CreateLabelRow("Anim", out _);
+        var labels = new List<string>
+        {
+            "None", "Fade", "Slide up", "Slide left", "Zoom", "Wipe"
+        };
+        var values = new[]
+        {
+            TextAnimation.None, TextAnimation.Fade, TextAnimation.SlideUp,
+            TextAnimation.SlideLeft, TextAnimation.Zoom, TextAnimation.Wipe
+        };
+        var selected = Array.IndexOf(values, _draft.Animation);
+        if (selected < 0) selected = 0;
+
+        var combo = new ComboBox
+        {
+            ItemsSource = labels,
+            SelectedIndex = selected,
+            FontSize = 9.5,
+            Height = 24,
+            Padding = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(0)
+        };
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (_building) return;
+            var index = combo.SelectedIndex;
+            if (index < 0 || index >= values.Length) return;
+            _draft.Animation = values[index];
+            CommitDraft();
+        };
+
+        Grid.SetColumn(combo, 1);
+        row.Children.Add(combo);
+        host.Children.Add(row);
     }
 
     private void AddColorSwatches(Panel host, string label, string current,
         Action<string> setter)
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
-        panel.Children.Add(new TextBlock
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 5) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(66) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var labelText = new TextBlock
         {
             Style = (Style)FindResource("ParamLabel"),
             Text = label,
-            Margin = new Thickness(0, 0, 0, 5)
-        });
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center
+        };
 
-        var wrap = new WrapPanel();
+        var wrap = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
         foreach (var hex in TextCatalog.Colors)
         {
             var selected = string.Equals(hex, current, StringComparison.OrdinalIgnoreCase);
             var swatch = new Border
             {
-                Width = 17,
-                Height = 17,
-                CornerRadius = new CornerRadius(3),
-                Margin = new Thickness(0, 0, 4, 4),
+                Width = 16,
+                Height = 16,
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(0, 0, 4, 3),
                 Background = BrushFromHex(hex),
                 BorderBrush = selected
                     ? (Brush)FindResource("AccentBrush")
@@ -551,16 +673,16 @@ public partial class TextPanel : UserControl
                 e.Handled = true;
                 setter(color);
                 CommitDraft();
-                SchedulePreview();
                 RebuildParams();
             };
             wrap.Children.Add(swatch);
         }
 
-        panel.Children.Add(wrap);
-        host.Children.Add(panel);
+        Grid.SetColumn(wrap, 1);
+        row.Children.Add(labelText);
+        row.Children.Add(wrap);
+        host.Children.Add(row);
     }
-
     private static Brush BrushFromHex(string hex)
     {
         try
@@ -576,61 +698,6 @@ public partial class TextPanel : UserControl
         }
     }
 
-    // --------------------------------------------------------------- preview
-
-    private void RenderPreview()
-    {
-        if (_draft == null) return;
-
-        PreviewImage.Source = TextOverlayRenderer.Render(_draft, 320, 180, true);
-
-        var preset = TextCatalog.Get(_draft.Preset);
-        if (StyleMatchesPreset(_draft, preset.Style))
-        {
-            PresetTitle.Text = preset.Name;
-            PresetDescription.Text = preset.Description;
-        }
-        else
-        {
-            PresetTitle.Text = "Custom";
-            PresetDescription.Text = "A preset with your own adjustments.";
-        }
-
-        DurationText.Text = _clip != null
-            ? $"{_clip.DurationSeconds:0.0} s on the timeline"
-            : "Will be 4.0 s on the timeline";
-    }
-
-    private void SchedulePreview()
-    {
-        _previewTimer.Stop();
-        _previewTimer.Start();
-    }
-
-    private static bool StyleMatchesPreset(TextOverlay text, TextOverlay preset) =>
-        string.Equals(text.FontFamily, preset.FontFamily, StringComparison.OrdinalIgnoreCase) &&
-        Math.Abs(text.FontSize - preset.FontSize) < 0.01 &&
-        text.Weight == preset.Weight &&
-        text.Italic == preset.Italic &&
-        string.Equals(text.Color, preset.Color, StringComparison.OrdinalIgnoreCase) &&
-        text.Align == preset.Align &&
-        Math.Abs(text.PositionX - preset.PositionX) < 0.001 &&
-        Math.Abs(text.PositionY - preset.PositionY) < 0.001 &&
-        Math.Abs(text.MaxWidth - preset.MaxWidth) < 0.001 &&
-        text.Shadow == preset.Shadow &&
-        Math.Abs(text.ShadowBlur - preset.ShadowBlur) < 0.01 &&
-        Math.Abs(text.ShadowOpacity - preset.ShadowOpacity) < 0.001 &&
-        Math.Abs(text.ShadowDepth - preset.ShadowDepth) < 0.01 &&
-        text.Outline == preset.Outline &&
-        Math.Abs(text.OutlineThickness - preset.OutlineThickness) < 0.01 &&
-        string.Equals(text.OutlineColor, preset.OutlineColor, StringComparison.OrdinalIgnoreCase) &&
-        text.Background == preset.Background &&
-        Math.Abs(text.BackgroundOpacity - preset.BackgroundOpacity) < 0.001 &&
-        Math.Abs(text.BackgroundPadding - preset.BackgroundPadding) < 0.01 &&
-        string.Equals(text.BackgroundColor, preset.BackgroundColor, StringComparison.OrdinalIgnoreCase) &&
-        text.Animation == preset.Animation &&
-        Math.Abs(text.AnimationSeconds - preset.AnimationSeconds) < 0.01;
-
     // ---------------------------------------------------------------- events
 
     private void TextEditor_TextChanged(object sender, TextChangedEventArgs e)
@@ -644,7 +711,6 @@ public partial class TextPanel : UserControl
 
         UpdateInputDirection();
         CommitDraft();
-        SchedulePreview();
     }
 
     private void UpdateInputDirection()
