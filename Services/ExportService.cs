@@ -664,7 +664,30 @@ public static class ExportService
 
             if (clip.Clip.Kind is MediaKind.Image or MediaKind.Text)
             {
-                filters.Add($"fps={fps}");
+                if (clip.IsText && clip.TextAnimation == TextAnimation.Zoom &&
+                    clip.TextAnimationSeconds > 0.01)
+                {
+                    var animationFrames = Math.Max(1,
+                        Math.Round(clip.TextAnimationSeconds * preset.Fps));
+                    var totalFrames = Math.Max(1,
+                        Math.Round(clip.Duration * preset.Fps));
+                    var zoom = "1+0.15*min(on/" +
+                               animationFrames.ToString(CultureInfo.InvariantCulture) +
+                               ",max(0,(" + totalFrames.ToString(CultureInfo.InvariantCulture) +
+                               "-on)/" + animationFrames.ToString(CultureInfo.InvariantCulture) +
+                               "))";
+
+                    filters.Add($"trim=duration={duration}");
+                    filters.Add("setpts=PTS-STARTPTS");
+                    filters.Add($"fps={fps}");
+                    filters.Add($"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':" +
+                                $"y='ih/2-(ih/zoom/2)':d=1:" +
+                                $"s={clip.Asset.Width}x{clip.Asset.Height}:fps={fps}");
+                }
+                else
+                {
+                    filters.Add($"fps={fps}");
+                }
             }
             else
             {

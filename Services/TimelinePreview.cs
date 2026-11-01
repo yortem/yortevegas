@@ -775,7 +775,7 @@ public sealed class TimelinePreview
             TextAnimation.SlideLeft => new TextAnimationState(progress,
                 (1 - progress) * 0.08, 0, 1, 1, 0, 0),
             TextAnimation.Zoom => new TextAnimationState(progress, 0, 0,
-                0.85 + 0.15 * progress, 1, 0, 0),
+                1 + 0.15 * progress, 1, 0, 0),
             TextAnimation.Wipe => new TextAnimationState(1, 0, 0, 1,
                 progress, 1, 0.05),
             _ => TextAnimationState.None
