@@ -62,6 +62,10 @@ public partial class MainWindow : Window
     private MediaKind? _filter;
     private Point _assetDragStart;
     private MediaAsset? _assetDragItem;
+    private readonly Dictionary<string, double> _dropDurations =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _dropProbing =
+        new(StringComparer.OrdinalIgnoreCase);
     private bool _libraryDirty = true;
     private Guid? _nudgeClipId;
     private DateTime _nudgeStamp;
@@ -1135,7 +1139,7 @@ public partial class MainWindow : Window
         }
 
         if (captureUndo) _project.BeginEdit();
-        var clip = _project.AddClip(asset, at, track);
+        var clip = _project.AddClip(asset, at, track, exact: true);
         if (clip == null)
         {
             FlashStatus("Could not add this media", error: true);
@@ -1220,8 +1224,9 @@ public partial class MainWindow : Window
                 var label = supported.Count == 1
                     ? Path.GetFileName(supported[0])
                     : $"{supported.Count} files";
-                Timeline.ShowDropPlaceholder(point, label,
-                    MediaProbeService.DetectKind(supported[0]), 4);
+                var kind = MediaProbeService.DetectKind(supported[0]);
+                Timeline.ShowDropPlaceholder(point, label, kind,
+                    DropDurationFor(supported[0], kind));
                 e.Effects = DragDropEffects.Copy;
             }
             else
@@ -1373,6 +1378,49 @@ public partial class MainWindow : Window
         await ImportFilesAsync(dialog.FileNames);
     }
 
+    /// <summary>
+    /// Duration shown by the drop placeholder for an external file. The probe
+    /// runs once per path in the background; until it finishes a 4 s hint is
+    /// used, then the next drag-over uses the real length.
+    /// </summary>
+    private double DropDurationFor(string path, MediaKind kind)
+    {
+        if (kind == MediaKind.Image) return _project.ImageDurationSeconds;
+
+        var known = _project.Assets.FirstOrDefault(a =>
+            string.Equals(a.FilePath, path, StringComparison.OrdinalIgnoreCase));
+        if (known != null && known.DurationSeconds > 0.05)
+            return known.DurationSeconds;
+
+        if (_dropDurations.TryGetValue(path, out var cached) && cached > 0.05)
+            return cached;
+
+        if (_dropProbing.Add(path))
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var info = await MediaProbeService.ProbeAsync(path).ConfigureAwait(false);
+                    if (info.Duration > 0.05)
+                    {
+                        Dispatcher.Invoke(() => _dropDurations[path] = info.Duration);
+                    }
+                }
+                catch
+                {
+                    // A failed probe only leaves the 4 s hint in place.
+                }
+                finally
+                {
+                    Dispatcher.Invoke(() => _dropProbing.Remove(path));
+                }
+            });
+        }
+
+        return 4;
+    }
+
     private async Task ImportFilesAsync(IEnumerable<string> paths, double? dropTime = null,
         TimelineTrack? dropTrack = null)
     {
@@ -1441,11 +1489,13 @@ public partial class MainWindow : Window
             }
 
             // Dropping onto the timeline (from Explorer or the library) should
-            // insert clips, including files already present in the library.
+            // insert clips at the exact drop time, including files already in
+            // the library. Multiple files are laid out one after another.
             int placed = 0;
             double? firstStart = null;
             if (dropTime is { } at)
             {
+                var cursor = at;
                 foreach (var path in requested)
                 {
                     if (!known.TryGetValue(path, out var asset)) continue;
@@ -1461,8 +1511,9 @@ public partial class MainWindow : Window
                         captured = true;
                     }
 
-                    var clip = _project.AddClip(asset, at, track);
+                    var clip = _project.AddClip(asset, cursor, track, exact: true);
                     if (clip == null) continue;
+                    cursor = clip.EndSeconds;
                     placed++;
                     firstStart ??= clip.StartSeconds;
                 }

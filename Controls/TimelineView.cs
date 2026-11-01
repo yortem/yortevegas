@@ -61,8 +61,10 @@ public sealed class TimelineView : FrameworkElement
     private static readonly Brush LevelLineBrush = FrozenArgb(150, 220, 235, 250);
     private static readonly Brush SnapGuideBrush = FrozenArgb(200, 242, 178, 58);
     private static readonly Brush FadeHandleBrush = Frozen("#7FC4FF");
-    private static readonly Brush CropIconBrush = FrozenArgb(105, 8, 12, 18);
-    private static readonly Brush CropIconHoverBrush = FrozenArgb(180, 8, 12, 18);
+    private static readonly Brush CropIconBrush = Frozen("#0B121B");
+    private static readonly Brush CropIconHoverBrush = Frozen("#1E2C3E");
+    private static readonly Brush LabelBackdropBrush = Frozen("#0B121B");
+    private static readonly Pen SelectedClipPen = CreateFadePen(Frozen("#2E9BFF"), 2);
     private static readonly Brush RangeFillBrush = FrozenArgb(90, 46, 155, 255);
     private static readonly Brush RangeHandleBrush = AmberBrush;
     private static readonly Brush OutsideRangeBrush = FrozenArgb(64, 3, 7, 12);
@@ -280,13 +282,20 @@ public sealed class TimelineView : FrameworkElement
     {
         if (_project == null) return null;
 
+        static bool IsTextTrack(TimelineTrack track) =>
+            track.Clips.Any(c => c.Kind == MediaKind.Text);
+
         if (TryGetTrackRow(point.Y, out var row, out _) && row != null &&
-            row.Accepts(kind) && !row.IsLocked)
+            row.Accepts(kind) && !row.IsLocked &&
+            (kind == MediaKind.Text || !IsTextTrack(row)))
         {
             return row;
         }
 
-        return _project.Tracks.FirstOrDefault(t => t.Accepts(kind) && !t.IsLocked);
+        return _project.Tracks.FirstOrDefault(t =>
+                   t.Accepts(kind) && !t.IsLocked &&
+                   (kind == MediaKind.Text || !IsTextTrack(t)))
+               ?? _project.Tracks.FirstOrDefault(t => t.Accepts(kind) && !t.IsLocked);
     }
 
     /// <summary>The visual clip under a point (used when dropping an effect preset).</summary>
@@ -911,17 +920,6 @@ public sealed class TimelineView : FrameworkElement
             var imageRect = new Rect(rect.X + 1, rect.Y + 1, rect.Width - 2, rect.Height - 2);
             dc.PushClip(new RectangleGeometry(imageRect));
             dc.DrawRectangle(GetImageBrush(thumb), null, imageRect);
-            dc.DrawRectangle(FrozenArgb(158, 10, 14, 20), null, imageRect);
-            dc.Pop();
-        }
-
-        // Opacity is visible on the block itself, so the timeline reflects it.
-        if (clip.Kind != MediaKind.Audio && clip.Opacity < 0.995)
-        {
-            var alpha = (byte)Math.Clamp((1 - clip.Opacity) * 150, 0, 150);
-            dc.PushClip(new RectangleGeometry(
-                new Rect(rect.X + 1, rect.Y + 1, Math.Max(1, rect.Width - 2), Math.Max(1, rect.Height - 2))));
-            dc.DrawRectangle(FrozenArgb(alpha, 6, 10, 16), null, rect);
             dc.Pop();
         }
 
@@ -937,8 +935,12 @@ public sealed class TimelineView : FrameworkElement
         dc.Pop();
 
         if (isSelected)
-            dc.DrawRectangle(FrozenArgb(32, 242, 178, 58), null,
-                new Rect(rect.X + 3.5, rect.Y, Math.Max(0, rect.Width - 3.5), Math.Min(16, rect.Height)));
+        {
+            dc.DrawRectangle(null, SelectedClipPen, rect);
+            dc.DrawRectangle(AccentBrush, null,
+                new Rect(rect.X + 3.5, rect.Y,
+                    Math.Max(0, rect.Width - 3.5), 2));
+        }
 
         // audio waveform / video filmstrip ticks
         if (clip.Kind == MediaKind.Audio && rect.Width > 34)
@@ -978,6 +980,16 @@ public sealed class TimelineView : FrameworkElement
         var labelY = rect.Y + (isSelected ? 5 : 4);
         var speedBadge = Math.Abs(clip.PlaybackRate - 1) > 0.005 && rect.Width > 100;
         var labelWidth = rect.Width - 18 - (speedBadge ? 38 : 0) - (showCropIcon ? 20 : 0);
+        var hasFrame = (clip.Kind == MediaKind.Video && asset?.Filmstrip.Count > 0) ||
+                       (clip.Kind == MediaKind.Image && asset?.Thumbnail != null);
+
+        if (hasFrame && labelWidth > 8 && rect.Height > 16)
+        {
+            dc.DrawRoundedRectangle(LabelBackdropBrush, null,
+                new Rect(rect.X + 4, rect.Y + 2,
+                    Math.Min(rect.Width - 6, labelWidth + 14), 15), 3, 3);
+        }
+
         if (!string.IsNullOrEmpty(clip.Name) && labelWidth > 8 && rect.Height > 16)
         {
             var label = missing ? $"{clip.Name}  (missing)" : clip.Name;
@@ -990,7 +1002,7 @@ public sealed class TimelineView : FrameworkElement
             var width = MeasureMono(text, 8.5) + 10;
             var badge = new Rect(rect.Right - width - 5 - (showCropIcon ? 20 : 0),
                 rect.Y + 3, width, 13);
-            dc.DrawRectangle(FrozenArgb(180, 8, 12, 18), null, badge);
+            dc.DrawRectangle(LabelBackdropBrush, null, badge);
             DrawText(dc, text, badge.X + 5, badge.Y + 2, 8.5, AmberBrush, MonoTypeface, width);
         }
 
@@ -998,6 +1010,11 @@ public sealed class TimelineView : FrameworkElement
         {
             var duration = MediaAsset.FormatDuration(clip.DurationSeconds);
             var tw = MeasureMono(duration, 8.5) + 2;
+            if (hasFrame)
+            {
+                dc.DrawRoundedRectangle(LabelBackdropBrush, null,
+                    new Rect(rect.Right - tw - 11, rect.Bottom - 16, tw + 8, 14), 3, 3);
+            }
             DrawText(dc, duration, rect.Right - tw - 7, rect.Bottom - 13, 8.5,
                 isSelected ? AmberBrush : DimBrush, MonoTypeface, tw);
         }
@@ -1231,12 +1248,10 @@ public sealed class TimelineView : FrameworkElement
             dc.DrawRectangle(GetImageBrush(frame), null, segment);
 
             if (i > 0)
-                dc.DrawRectangle(FrozenArgb(120, 6, 10, 16), null,
+                dc.DrawRectangle(LabelBackdropBrush, null,
                     new Rect(segment.X, segment.Y, 1, segment.Height));
         }
 
-        // Keep the clip name readable over the frames.
-        dc.DrawRectangle(FrozenArgb(102, 8, 12, 18), null, inner);
         dc.Pop();
     }
 

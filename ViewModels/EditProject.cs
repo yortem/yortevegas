@@ -426,6 +426,16 @@ public sealed class EditProject : ObservableObject
     public TimelineTrack EnsureTrack(MediaKind kind)
     {
         var trackKind = kind == MediaKind.Audio ? TrackKind.Audio : TrackKind.Video;
+
+        // Media should not land on a text layer when a picture layer is free.
+        if (kind != MediaKind.Text)
+        {
+            var mediaTrack = Tracks.FirstOrDefault(t =>
+                t.Accepts(kind) && !t.IsLocked &&
+                !t.Clips.Any(c => c.Kind == MediaKind.Text));
+            if (mediaTrack != null) return mediaTrack;
+        }
+
         return Tracks.FirstOrDefault(t => t.Accepts(kind) && !t.IsLocked)
             ?? Tracks.FirstOrDefault(t => t.Accepts(kind))
             ?? AddTrack(trackKind);
@@ -445,7 +455,8 @@ public sealed class EditProject : ObservableObject
 
     // ----------------------------------------------------------------- clips
 
-    public TimelineClip? AddClip(MediaAsset asset, double at, TimelineTrack? track = null, bool notify = true)
+    public TimelineClip? AddClip(MediaAsset asset, double at, TimelineTrack? track = null,
+        bool notify = true, bool exact = false)
     {
         track ??= EnsureTrack(asset.Kind);
         if (!track.Accepts(asset.Kind)) track = EnsureTrack(asset.Kind);
@@ -455,7 +466,9 @@ public sealed class EditProject : ObservableObject
             ? Math.Max(0.1, ImageDurationSeconds)
             : asset.DurationSeconds > 0.05 ? asset.DurationSeconds : 5;
 
-        var start = FirstFreeStart(track, at, duration);
+        var start = exact
+            ? SnapToFrame(Math.Max(0, at))
+            : FirstFreeStart(track, at, duration);
         var clip = new TimelineClip
         {
             AssetId = asset.Id,
