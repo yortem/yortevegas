@@ -397,6 +397,12 @@
               <TextBlock Text="fx" FontFamily="Consolas, Segoe UI" FontSize="15"
                          FontStyle="Italic" FontWeight="Bold" VerticalAlignment="Center"/>
             </ToggleButton>
+            <ToggleButton x:Name="RailTransitions" Style="{StaticResource RailButton}"
+                          AutomationProperties.Name="Transitions"
+                          Click="RailTransitions_Click" ToolTip="Transitions for the selected clip">
+              <TextBlock Text="&#x21C4;" FontFamily="Segoe UI" FontSize="15"
+                         VerticalAlignment="Center"/>
+            </ToggleButton>
           </StackPanel>
 
           <Button Grid.Row="2" Style="{StaticResource GhostButton}" Width="38" Height="38" Padding="0"
@@ -508,6 +514,13 @@
                   BorderBrush="#141E2A" BorderThickness="0,0,1,0"
                   Visibility="Collapsed">
             <controls:EffectsPanel x:Name="EffectsHost"/>
+          </Border>
+
+          <!-- transitions inspector (same slot as the media library) -->
+          <Border x:Name="TransitionsPanelBorder" Grid.Column="0" Background="#0D131D"
+                  BorderBrush="#141E2A" BorderThickness="0,0,1,0"
+                  Visibility="Collapsed">
+            <controls:TransitionsPanel x:Name="TransitionsHost"/>
           </Border>
 
           <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="#090A0C"

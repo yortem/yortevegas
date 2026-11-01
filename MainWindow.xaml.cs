@@ -21,6 +21,14 @@ public partial class MainWindow : Window
 {
     private const string AssetDragFormat = "YorteVegas.AssetId";
     private const string EffectDragFormat = EffectsPanel.EffectDragFormat;
+    private const string TransitionDragFormat = TransitionsPanel.TransitionDragFormat;
+
+    private enum LeftPanel
+    {
+        Media,
+        Effects,
+        Transitions
+    }
 
     private static readonly Geometry PlayGeometry = Geometry.Parse("M8 5 L19 12 L8 19 Z");
     private static readonly Geometry PauseGeometry = Geometry.Parse("M7 5 H11 V19 H7 Z M14 5 H18 V19 H14 Z");
@@ -32,6 +40,7 @@ public partial class MainWindow : Window
     private static readonly Brush LevelPeakBrush = Freeze("#F87171");
     private readonly DispatcherTimer _levelTimer;
     private readonly DispatcherTimer _effectsTimer;
+    private readonly DispatcherTimer _transitionTimer;
 
     private readonly AppSettings _settings;
     private readonly TimelinePreview _preview;
@@ -55,10 +64,16 @@ public partial class MainWindow : Window
     private DateTime _nudgeStamp;
     private bool _nudging;
     private readonly HashSet<Guid> _filmstripLoading = new();
-    private bool _effectsVisible;
     private bool _effectsAttaching;
     private bool _effectsCaptured;
     private ProjectFile? _effectsSnapshot;
+    private LeftPanel _leftPanel = LeftPanel.Media;
+    private bool _transitionsAttaching;
+    private bool _transitionsCaptured;
+    private ProjectFile? _transitionsSnapshot;
+
+    private bool EffectsVisible => _leftPanel == LeftPanel.Effects;
+    private bool TransitionsVisible => _leftPanel == LeftPanel.Transitions;
 
     public MainWindow(AppSettings settings, string? startupProject = null,
         IReadOnlyList<string>? startupImports = null)
@@ -100,6 +115,25 @@ public partial class MainWindow : Window
 
             _effectsTimer.Stop();
             _effectsTimer.Start();
+        };
+
+        _transitionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(70) };
+        _transitionTimer.Tick += (_, _) =>
+        {
+            _transitionTimer.Stop();
+            _project.NotifyTransitionChanged();
+        };
+
+        TransitionsHost.Changed += (_, _) =>
+        {
+            if (!_transitionsCaptured)
+            {
+                _transitionsCaptured = true;
+                if (_transitionsSnapshot != null) _project.BeginEdit(_transitionsSnapshot);
+            }
+
+            _transitionTimer.Stop();
+            _transitionTimer.Start();
         };
 
         var defaults = new ProjectSettings
@@ -187,10 +221,15 @@ public partial class MainWindow : Window
         UpdatePreviewVisibility();
         _preview.Refresh();
 
-        if (_effectsVisible)
+        if (EffectsVisible)
         {
             var clip = _project.SelectedClip;
             AttachEffects(clip != null && clip.Kind != MediaKind.Audio ? clip : null);
+        }
+        else if (TransitionsVisible)
+        {
+            var clip = _project.SelectedClip;
+            AttachTransitions(clip != null && clip.Kind != MediaKind.Audio ? clip : null);
         }
     }
 
@@ -272,8 +311,10 @@ public partial class MainWindow : Window
 
         DeleteButton.IsEnabled = count > 0;
 
-        if (_effectsVisible)
+        if (EffectsVisible)
             UpdateEffectsForSelection();
+        else if (TransitionsVisible)
+            UpdateTransitionsForSelection();
     }
 
     /// <summary>Keeps the effects inspector pointed at the selected visual clip.</summary>
@@ -297,6 +338,27 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Keeps the transitions inspector pointed at the selected visual clip.</summary>
+    private void UpdateTransitionsForSelection()
+    {
+        if (_transitionsAttaching) return;
+
+        var clip = _project.SelectedClip;
+        var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+        if (ReferenceEquals(target, TransitionsHost.EditedClip)) return;
+
+        _transitionsAttaching = true;
+        try
+        {
+            FlushTransitions();
+            AttachTransitions(target);
+        }
+        finally
+        {
+            _transitionsAttaching = false;
+        }
+    }
+
     private void AttachEffects(TimelineClip? clip)
     {
         _effectsCaptured = false;
@@ -304,11 +366,25 @@ public partial class MainWindow : Window
         EffectsHost.Attach(_project, clip);
     }
 
+    private void AttachTransitions(TimelineClip? clip)
+    {
+        _transitionsCaptured = false;
+        _transitionsSnapshot = clip != null ? ProjectService.Capture(_project) : null;
+        TransitionsHost.Attach(_project, clip);
+    }
+
     private void FlushEffects()
     {
         if (!_effectsTimer.IsEnabled) return;
         _effectsTimer.Stop();
         _project.NotifyEffectChanged();
+    }
+
+    private void FlushTransitions()
+    {
+        if (!_transitionTimer.IsEnabled) return;
+        _transitionTimer.Stop();
+        _project.NotifyTransitionChanged();
     }
 
     private void UpdateUndoButtons()
@@ -378,24 +454,37 @@ public partial class MainWindow : Window
         PreviewPlaceholderHint.Text = "mpv could not open this file.";
     }
 
-    private void RailMedia_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(false);
+    private void RailMedia_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(LeftPanel.Media);
 
-    private void RailEffects_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(true);
+    private void RailEffects_Click(object sender, RoutedEventArgs e) => ShowLeftPanel(LeftPanel.Effects);
+
+    private void RailTransitions_Click(object sender, RoutedEventArgs e) =>
+        ShowLeftPanel(LeftPanel.Transitions);
 
     /// <summary>
-    /// Swaps the media library for the effects inspector in the same column, so
-    /// the monitor stays visible while an effect is adjusted.
+    /// Swaps the media library for the effects or transitions inspector in the
+    /// same column, so the monitor stays visible while a clip is adjusted.
     /// </summary>
-    private void ShowLeftPanel(bool effects)
+    private void ShowLeftPanel(LeftPanel panel)
     {
-        _effectsVisible = effects;
-        RailMedia.IsChecked = !effects;
-        RailEffects.IsChecked = effects;
+        var previous = _leftPanel;
+        _leftPanel = panel;
 
-        MediaLibraryPanel.Visibility = effects ? Visibility.Collapsed : Visibility.Visible;
-        EffectsPanelBorder.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
+        RailMedia.IsChecked = panel == LeftPanel.Media;
+        RailEffects.IsChecked = panel == LeftPanel.Effects;
+        RailTransitions.IsChecked = panel == LeftPanel.Transitions;
 
-        if (effects)
+        MediaLibraryPanel.Visibility =
+            panel == LeftPanel.Media ? Visibility.Visible : Visibility.Collapsed;
+        EffectsPanelBorder.Visibility =
+            panel == LeftPanel.Effects ? Visibility.Visible : Visibility.Collapsed;
+        TransitionsPanelBorder.Visibility =
+            panel == LeftPanel.Transitions ? Visibility.Visible : Visibility.Collapsed;
+
+        if (previous == LeftPanel.Effects) FlushEffects();
+        if (previous == LeftPanel.Transitions) FlushTransitions();
+
+        if (panel == LeftPanel.Effects)
         {
             _preview.Pause();
             var clip = _project.SelectedClip;
@@ -404,7 +493,6 @@ public partial class MainWindow : Window
             _effectsAttaching = true;
             try
             {
-                FlushEffects();
                 AttachEffects(target);
             }
             finally
@@ -412,9 +500,24 @@ public partial class MainWindow : Window
                 _effectsAttaching = false;
             }
         }
+        else if (panel == LeftPanel.Transitions)
+        {
+            _preview.Pause();
+            var clip = _project.SelectedClip;
+            var target = clip != null && clip.Kind != MediaKind.Audio ? clip : null;
+
+            _transitionsAttaching = true;
+            try
+            {
+                AttachTransitions(target);
+            }
+            finally
+            {
+                _transitionsAttaching = false;
+            }
+        }
         else
         {
-            FlushEffects();
             Timeline.Focus();
         }
     }
@@ -944,15 +1047,30 @@ public partial class MainWindow : Window
         var point = e.GetPosition(Timeline);
         e.Effects = DragDropEffects.None;
 
-        if (e.Data.GetDataPresent(EffectDragFormat))
+        if (e.Data.GetDataPresent(TransitionDragFormat))
         {
             Timeline.ClearDropPlaceholder();
+            if (Timeline.FindTransitionTarget(point) != null)
+            {
+                Timeline.ShowTransitionPlaceholder(point);
+                e.Effects = DragDropEffects.Copy;
+            }
+            else
+            {
+                Timeline.ClearTransitionPlaceholder();
+            }
+        }
+        else if (e.Data.GetDataPresent(EffectDragFormat))
+        {
+            Timeline.ClearDropPlaceholder();
+            Timeline.ClearTransitionPlaceholder();
             if (Timeline.ClipAtPoint(point) != null)
                 e.Effects = DragDropEffects.Copy;
         }
         else if (e.Data.GetDataPresent(AssetDragFormat) &&
             Guid.TryParse(e.Data.GetData(AssetDragFormat) as string, out var id))
         {
+            Timeline.ClearTransitionPlaceholder();
             var asset = _project.FindAsset(id);
             if (asset != null)
             {
@@ -970,6 +1088,7 @@ public partial class MainWindow : Window
         else if (e.Data.GetDataPresent(DataFormats.FileDrop) &&
                  e.Data.GetData(DataFormats.FileDrop) is string[] files)
         {
+            Timeline.ClearTransitionPlaceholder();
             var supported = files.Where(MediaProbeService.IsSupported).ToList();
             if (supported.Count > 0)
             {
@@ -987,6 +1106,7 @@ public partial class MainWindow : Window
         }
         else
         {
+            Timeline.ClearTransitionPlaceholder();
             Timeline.ClearDropPlaceholder();
         }
 
@@ -997,6 +1117,37 @@ public partial class MainWindow : Window
     {
         var point = e.GetPosition(Timeline);
         Timeline.ClearDropPlaceholder();
+        Timeline.ClearTransitionPlaceholder();
+
+        if (e.Data.GetDataPresent(TransitionDragFormat) &&
+            e.Data.GetData(TransitionDragFormat) is TransitionDropData transitionDrop)
+        {
+            e.Handled = true;
+            var target = Timeline.FindTransitionTarget(point);
+            if (target == null)
+            {
+                FlashStatus("Drop the transition on a crossfade or the edge of a video clip",
+                    error: true);
+                return;
+            }
+
+            _project.BeginEdit();
+            var transition = TransitionCatalog.Create(transitionDrop.Kind);
+            foreach (var pair in transitionDrop.Values)
+                transition.Set(pair.Key, pair.Value);
+            transition.Enabled = true;
+
+            if (target.Outgoing) target.Clip.TransitionOut = transition;
+            else target.Clip.TransitionIn = transition;
+            _project.NotifyTransitionChanged();
+
+            _project.SelectedClipId = target.Clip.Id;
+            ShowLeftPanel(LeftPanel.Transitions);
+            TransitionsHost.SelectTransition(transitionDrop.Kind, target.Outgoing);
+            FlashStatus($"{TransitionCatalog.Get(transitionDrop.Kind).Name} applied to " +
+                        $"{target.Clip.Name}");
+            return;
+        }
 
         if (e.Data.GetDataPresent(EffectDragFormat) &&
             e.Data.GetData(EffectDragFormat) is EffectDropData effectDrop)
@@ -1020,7 +1171,7 @@ public partial class MainWindow : Window
             _project.NotifyEffectChanged();
 
             _project.SelectedClipId = target.Id;
-            ShowLeftPanel(true);
+            ShowLeftPanel(LeftPanel.Effects);
             EffectsHost.SelectEffect(effect);
             FlashStatus($"{EffectCatalog.Get(effect.Kind).Name} applied to {target.Name}");
             return;

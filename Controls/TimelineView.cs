@@ -68,6 +68,11 @@ public sealed class TimelineView : FrameworkElement
     private static readonly Brush LevelActiveBrush = Frozen("#F2B23A");
     private static readonly Brush AudioLevelActiveBrush = Frozen("#7FC4FF");
     private static readonly Pen LoopBoundaryPen = CreateLoopPen();
+    private static readonly Brush TransitionBadgeBrush = FrozenArgb(232, 22, 34, 54);
+    private static readonly Brush TransitionFillBrush = FrozenArgb(48, 154, 92, 255);
+    private static readonly Pen TransitionBadgePen = CreateFadePen(Frozen("#9A5CFF"), 1);
+    private static readonly Pen TransitionPen = CreateFadePen(Frozen("#9A5CFF"), 1.4);
+    private static readonly Brush TransitionTextBrush = Frozen("#D9C8FF");
 
     private static Pen CreateLoopPen()
     {
@@ -159,6 +164,7 @@ public sealed class TimelineView : FrameworkElement
     private (TimelineTrack? Track, int Button)? _hoverHeaderButton;
     private readonly Dictionary<ImageSource, ImageBrush> _imageBrushes = new();
     private DropPreview? _dropPreview;
+    private TransitionTarget? _transitionPreview;
     private (TimelineTrack Track, EditProject.ClipOverlap Overlap)? _hoverFade;
     private (TimelineTrack Track, Guid ClipId)? _hoverLevel;
     private (Guid ClipId, bool FadeIn)? _hoverFadeHandle;
@@ -166,6 +172,14 @@ public sealed class TimelineView : FrameworkElement
     private double? _snapGuideSeconds;
 
     private sealed record DropPreview(double Start, double Duration, string Name, TimelineTrack Track);
+
+    /// <summary>
+    /// Where a dragged transition would land. <see cref="Clip"/> is the clip
+    /// that stores it (the incoming clip for an overlap).
+    /// </summary>
+    public sealed record TransitionTarget(
+        TimelineTrack Track, TimelineClip Clip, bool Outgoing,
+        double StartSeconds, double EndSeconds, double Duration, bool OnOverlap);
 
     public TimelineView()
     {
@@ -280,6 +294,62 @@ public sealed class TimelineView : FrameworkElement
         if (!TryGetTrackRow(point.Y, out var track, out _) || track == null) return null;
         if (track.Kind != TrackKind.Video || track.IsLocked) return null;
         return ClipAt(track, point);
+    }
+
+    /// <summary>
+    /// Finds the transition edge under a point. A point inside an overlap is the
+    /// incoming clip's transition-in; otherwise the half of the clip decides
+    /// between the start and end transition.
+    /// </summary>
+    public TransitionTarget? FindTransitionTarget(Point point)
+    {
+        if (_project == null || point.X < HeaderWidth) return null;
+        if (!TryGetTrackRow(point.Y, out var track, out _) || track == null) return null;
+        if (track.Kind != TrackKind.Video || track.IsLocked) return null;
+
+        var time = TimeAtPoint(point);
+        var overlap = _project.GetOverlaps(track)
+            .FirstOrDefault(o => time >= o.StartSeconds && time < o.EndSeconds);
+        if (overlap != null)
+        {
+            var duration = Math.Max(0.05, overlap.EndSeconds - overlap.StartSeconds);
+            return new TransitionTarget(track, overlap.Incoming, false,
+                overlap.StartSeconds, overlap.EndSeconds, duration, true);
+        }
+
+        var clip = ClipAt(track, point);
+        if (clip == null) return null;
+
+        var rect = ClipRect(track, clip);
+        var outgoing = point.X >= rect.X + rect.Width / 2;
+        var transition = outgoing ? clip.TransitionOut : clip.TransitionIn;
+        var length = Math.Clamp(TransitionCatalog.Duration(transition, 0.6),
+            0.1, Math.Max(0.1, clip.DurationSeconds));
+
+        var start = outgoing ? clip.EndSeconds - length : clip.StartSeconds;
+        var end = outgoing ? clip.EndSeconds : clip.StartSeconds + length;
+        return new TransitionTarget(track, clip, outgoing, start, end, length, false);
+    }
+
+    public void ShowTransitionPlaceholder(Point point)
+    {
+        var target = FindTransitionTarget(point);
+        if (ReferenceEquals(target?.Clip, _transitionPreview?.Clip) &&
+            target?.Outgoing == _transitionPreview?.Outgoing &&
+            target?.OnOverlap == _transitionPreview?.OnOverlap)
+        {
+            return;
+        }
+
+        _transitionPreview = target;
+        InvalidateVisual();
+    }
+
+    public void ClearTransitionPlaceholder()
+    {
+        if (_transitionPreview == null) return;
+        _transitionPreview = null;
+        InvalidateVisual();
     }
 
     /// <summary>Shows the translucent clip-shaped hint used while dragging media.</summary>
@@ -536,6 +606,7 @@ public sealed class TimelineView : FrameworkElement
         DrawOutsideRange(dc, width);
         DrawDropPreview(dc, width);
         DrawClipDropTarget(dc, width);
+        DrawTransitionPreview(dc, width);
         DrawSnapGuide(dc, width);
         DrawRuler(dc, width);
         DrawRangeBar(dc, width);
@@ -1451,6 +1522,25 @@ public sealed class TimelineView : FrameworkElement
                 dc.DrawRectangle(hovered ? FadeShadeHoverBrush : FadeShadeBrush, null,
                     new Rect(x1, laneTop, x2 - x1, laneHeight));
 
+                var transition = overlap.Incoming.TransitionIn is { Enabled: true } incomingTransition
+                    ? incomingTransition
+                    : overlap.Outgoing.TransitionOut is { Enabled: true } outgoingTransition
+                        ? outgoingTransition
+                        : null;
+
+                if (transition != null)
+                {
+                    var name = TransitionCatalog.Get(transition.Kind).Name;
+                    var badgeWidth = MeasureTransitionBadge(name);
+                    var badgeX = x1 + (x2 - x1 - badgeWidth) / 2;
+                    if (badgeX < x1 + 3) badgeX = x1 + 3;
+                    DrawTransitionBadge(dc, badgeX, laneTop + 3, name);
+
+                    // A dissolve is a normal crossfade; the other transitions
+                    // are not described by the fade curves, so leave them out.
+                    if (transition.Kind != TransitionKind.Dissolve) continue;
+                }
+
                 var top = laneTop + 5;
                 var bottom = laneTop + laneHeight - 5;
                 var height = bottom - top;
@@ -1458,6 +1548,33 @@ public sealed class TimelineView : FrameworkElement
 
                 DrawFadeCurve(dc, overlap, x1, x2, top, bottom, FadeOutPen, outgoing: true);
                 DrawFadeCurve(dc, overlap, x1, x2, top, bottom, FadeInPen, outgoing: false);
+            }
+
+            var overlaps = _project.GetOverlaps(track).ToList();
+            foreach (var clip in track.Clips)
+            {
+                var rect = ClipRect(track, clip);
+                if (rect.Width < 36) continue;
+
+                var badgeY = Math.Min(rect.Y + 17, rect.Bottom - 16);
+                if (clip.TransitionIn is { Enabled: true } transitionIn &&
+                    !overlaps.Any(o => o.Incoming.Id == clip.Id))
+                {
+                    DrawTransitionBadge(dc, rect.X + 3, badgeY,
+                        TransitionCatalog.Get(transitionIn.Kind).Name);
+                }
+
+                if (clip.TransitionOut is { Enabled: true } transitionOut &&
+                    !overlaps.Any(o => o.Outgoing.Id == clip.Id))
+                {
+                    var name = TransitionCatalog.Get(transitionOut.Kind).Name;
+                    var badgeWidth = MeasureTransitionBadge(name);
+                    if (badgeWidth + 8 < rect.Width)
+                    {
+                        DrawTransitionBadge(dc, rect.Right - badgeWidth - 3,
+                            badgeY, name);
+                    }
+                }
             }
         }
 
@@ -1487,6 +1604,49 @@ public sealed class TimelineView : FrameworkElement
 
         geometry.Freeze();
         dc.DrawGeometry(null, pen, geometry);
+    }
+
+    private FormattedText TransitionBadgeText(string text) => new(
+        text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
+        SemiBoldTypeface, 8.5, TransitionTextBrush,
+        VisualTreeHelper.GetDpi(this).PixelsPerDip);
+
+    private double MeasureTransitionBadge(string text) =>
+        TransitionBadgeText(text).Width + 12;
+
+    private void DrawTransitionBadge(DrawingContext dc, double x, double y, string text)
+    {
+        var formatted = TransitionBadgeText(text);
+        var width = formatted.Width + 12;
+        const double height = 15;
+
+        dc.DrawRoundedRectangle(TransitionBadgeBrush, TransitionBadgePen,
+            new Rect(x, y, width, height), 3, 3);
+        dc.DrawText(formatted, new Point(x + 6, y + 2));
+    }
+
+    private void DrawTransitionPreview(DrawingContext dc, double width)
+    {
+        if (_transitionPreview is not { } target) return;
+
+        var x1 = Math.Max(HeaderWidth + 1, TimeToX(target.StartSeconds));
+        var x2 = Math.Min(width, TimeToX(target.EndSeconds));
+        if (x2 - x1 < 2) return;
+
+        var laneTop = TrackTop(target.Track);
+        var laneHeight = Math.Min(target.Track.Height,
+            Math.Max(0, LaneBottom - laneTop));
+        if (laneHeight <= 2) return;
+
+        dc.DrawRectangle(TransitionFillBrush, TransitionPen,
+            new Rect(x1, laneTop, x2 - x1, laneHeight));
+
+        var label = target.OnOverlap
+            ? $"OVERLAP  {target.Duration:0.00}s"
+            : target.Outgoing
+                ? $"OUT  {target.Duration:0.00}s"
+                : $"IN  {target.Duration:0.00}s";
+        DrawTransitionBadge(dc, x1 + 4, laneTop + 3, label);
     }
 
     private static double Ease(double t, FadeCurveKind kind) => kind switch
@@ -1525,7 +1685,11 @@ public sealed class TimelineView : FrameworkElement
         {
             var x = Math.Min(TimeToX(fade.Overlap.StartSeconds) + 10, width - 300);
             var y = TrackTop(fade.Track) + 4;
-            var label = $"Crossfade · {fade.Overlap.Incoming.FadeCurve.ToLabel()} · right-click to change";
+            var transition = fade.Overlap.Incoming.TransitionIn ??
+                             fade.Overlap.Outgoing.TransitionOut;
+            var label = transition is { Enabled: true }
+                ? $"{TransitionCatalog.Get(transition.Kind).Name} · right-click to change"
+                : $"Crossfade · {fade.Overlap.Incoming.FadeCurve.ToLabel()} · right-click to change";
             DrawTooltipBox(dc, label, x, y - 24, width);
         }
         else if (_hoverHeaderButton is { } hover && hover.Track != null)
@@ -2605,6 +2769,8 @@ public sealed class TimelineView : FrameworkElement
 
         var fadeIn = BuildFadeMenu(clip, fadeIn: true);
         var fadeOut = BuildFadeMenu(clip, fadeIn: false);
+        var transitionIn = BuildTransitionMenu(clip, outgoing: false);
+        var transitionOut = BuildTransitionMenu(clip, outgoing: true);
 
         menu.Items.Add(split);
         menu.Items.Add(duplicate);
@@ -2618,6 +2784,11 @@ public sealed class TimelineView : FrameworkElement
         menu.Items.Add(new Separator());
         menu.Items.Add(fadeIn);
         menu.Items.Add(fadeOut);
+        if (clip.Kind != MediaKind.Audio)
+        {
+            menu.Items.Add(transitionIn);
+            menu.Items.Add(transitionOut);
+        }
         menu.Items.Add(mute);
         menu.Items.Add(new Separator());
         menu.Items.Add(delete);
@@ -2665,6 +2836,64 @@ public sealed class TimelineView : FrameworkElement
         if (fadeIn) clip.FadeInSeconds = value;
         else clip.FadeOutSeconds = value;
         _project.NotifyTimelineChanged();
+        InvalidateVisual();
+    }
+
+    private MenuItem BuildTransitionMenu(TimelineClip clip, bool outgoing)
+    {
+        var current = outgoing ? clip.TransitionOut : clip.TransitionIn;
+        var menu = new MenuItem
+        {
+            Header = outgoing ? "Transition out" : "Transition in",
+            Icon = MenuIcon(outgoing
+                ? "M 2,3 H 8 V 13 H 2 Z M 10,5 L 14,8 L 10,11"
+                : "M 4,5 L 8,8 L 4,11 M 8,3 H 14 V 13 H 8 Z")
+        };
+
+        var none = new MenuItem
+        {
+            Header = "None",
+            IsCheckable = true,
+            IsChecked = current == null
+        };
+        none.Click += (_, _) => SetTransition(clip, outgoing, null);
+        menu.Items.Add(none);
+        menu.Items.Add(new Separator());
+
+        foreach (var definition in TransitionCatalog.All)
+        {
+            var kind = definition.Kind;
+            var item = new MenuItem
+            {
+                Header = definition.Name,
+                IsCheckable = true,
+                IsChecked = current?.Kind == kind
+            };
+            item.Click += (_, _) => SetTransition(clip, outgoing, kind);
+            menu.Items.Add(item);
+        }
+
+        return menu;
+    }
+
+    private void SetTransition(TimelineClip clip, bool outgoing, TransitionKind? kind)
+    {
+        if (_project == null) return;
+
+        var current = outgoing ? clip.TransitionOut : clip.TransitionIn;
+        if (kind == null)
+        {
+            if (current == null) return;
+            _project.BeginEdit();
+            _project.RemoveTransition(clip, outgoing);
+        }
+        else
+        {
+            if (current?.Kind == kind) return;
+            _project.BeginEdit();
+            _project.SetTransition(clip, outgoing, kind.Value);
+        }
+
         InvalidateVisual();
     }
 
@@ -2781,6 +3010,9 @@ public sealed class TimelineView : FrameworkElement
             menu.Items.Add(item);
         }
 
+        menu.Items.Add(new Separator());
+        if (track.Kind == TrackKind.Video)
+            menu.Items.Add(BuildTransitionMenu(incoming, outgoing: false));
         menu.Items.Add(new Separator());
         var removeOverlap = new MenuItem { Header = "Remove overlap" };
         removeOverlap.Click += (_, _) =>

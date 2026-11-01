@@ -65,7 +65,20 @@ public static class ExportService
         public double SourceIn;
         public double Rate = 1;
         public List<ClipEffect> Effects = new();
+        public ClipTransition? InTransition;
+        public double InTransitionStart;
+        public double InTransitionDuration;
+        public bool InTransitionOverlap;
+        public ClipTransition? OutTransition;
+        public double OutTransitionStart;
+        public double OutTransitionDuration;
+        public bool OutTransitionOverlap;
     }
+
+    private sealed record FlashRegion(double Start, double Duration, double Strength);
+
+    private sealed record RevealTransition(
+        ClipTransition Transition, double Start, double Duration, bool Incoming, int Index);
 
     public static ExportPreset CreatePreset(EditProject project, ExportQuality quality)
     {
@@ -169,7 +182,7 @@ public static class ExportService
             throw new InvalidOperationException("The export range is empty.");
 
         var total = rangeEnd - rangeStart;
-        var clips = CollectClips(project, rangeStart, rangeEnd);
+        var clips = CollectClips(project, rangeStart, rangeEnd, out var flashRegions);
         if (!clips.Any(c => c.Visual))
             throw new InvalidOperationException("There are no video clips to render.");
 
@@ -197,7 +210,7 @@ public static class ExportService
             });
         }
 
-        var graph = BuildGraph(clips, preset, total, silenceIndex);
+        var graph = BuildGraph(clips, preset, total, silenceIndex, flashRegions);
         var totalTime = TimeSpan.FromSeconds(total);
         progress?.Report(new ExportProgress("Preparing…", 0, TimeSpan.Zero, totalTime));
 
@@ -241,7 +254,7 @@ public static class ExportService
     }
 
     private static List<ClipInput> CollectClips(EditProject project,
-        double rangeStart, double rangeEnd)
+        double rangeStart, double rangeEnd, out List<FlashRegion> flashRegions)
     {
         var clips = new List<ClipInput>();
         var anySolo = project.Tracks.Any(t => t.IsSolo);
@@ -328,7 +341,9 @@ public static class ExportService
         }
 
         ApplyOverlaps(project, clips);
+        ApplyTransitions(clips);
         ClipToRange(clips, rangeStart, rangeEnd);
+        flashRegions = CollectFlashRegions(clips);
 
         for (var i = 0; i < clips.Count; i++) clips[i].InputIndex = i;
         return clips;
@@ -358,6 +373,28 @@ public static class ExportService
                 clip.ManualIn = Math.Max(0, clip.ManualIn - skipped);
                 clip.FadeIn = Math.Max(0, clip.FadeIn - skipped);
                 if (clip.FadeOutAt >= 0) clip.FadeOutAt = Math.Max(0, clip.FadeOutAt - skipped);
+
+                if (clip.InTransition != null)
+                {
+                    clip.InTransitionStart -= skipped;
+                    if (clip.InTransitionStart < 0)
+                    {
+                        clip.InTransitionDuration += clip.InTransitionStart;
+                        clip.InTransitionStart = 0;
+                    }
+                    if (clip.InTransitionDuration <= 0.001) clip.InTransition = null;
+                }
+
+                if (clip.OutTransition != null)
+                {
+                    clip.OutTransitionStart -= skipped;
+                    if (clip.OutTransitionStart < 0)
+                    {
+                        clip.OutTransitionDuration += clip.OutTransitionStart;
+                        clip.OutTransitionStart = 0;
+                    }
+                    if (clip.OutTransitionDuration <= 0.001) clip.OutTransition = null;
+                }
             }
 
             clip.Start = visibleStart - rangeStart;
@@ -372,6 +409,27 @@ public static class ExportService
             else if (clip.FadeOutAt >= 0)
             {
                 clip.FadeOut = Math.Min(clip.FadeOut, clip.Duration - clip.FadeOutAt);
+            }
+
+            if (clip.InTransition != null)
+            {
+                clip.InTransitionDuration = Math.Min(clip.InTransitionDuration,
+                    Math.Max(0, clip.Duration - clip.InTransitionStart));
+                if (clip.InTransitionDuration <= 0.001) clip.InTransition = null;
+            }
+
+            if (clip.OutTransition != null)
+            {
+                if (clip.OutTransitionStart >= clip.Duration)
+                {
+                    clip.OutTransition = null;
+                }
+                else
+                {
+                    clip.OutTransitionDuration = Math.Min(clip.OutTransitionDuration,
+                        Math.Max(0, clip.Duration - clip.OutTransitionStart));
+                    if (clip.OutTransitionDuration <= 0.001) clip.OutTransition = null;
+                }
             }
         }
 
@@ -391,10 +449,40 @@ public static class ExportService
                 if (duration <= 0.01) continue;
 
                 var incoming = clips.FirstOrDefault(c => c.Clip.Id == overlap.Incoming.Id);
+                var outgoing = clips.FirstOrDefault(c => c.Clip.Id == overlap.Outgoing.Id);
+
+                var transition = overlap.Incoming.TransitionIn;
+                if (transition is not { Enabled: true }) transition = overlap.Outgoing.TransitionOut;
+
+                if (transition is { Enabled: true })
+                {
+                    if (incoming != null)
+                    {
+                        incoming.InTransition = transition;
+                        incoming.InTransitionStart =
+                            Math.Max(0, overlap.StartSeconds - incoming.Clip.StartSeconds);
+                        incoming.InTransitionDuration = duration;
+                        incoming.InTransitionOverlap = true;
+                        incoming.FadeIn = 0;
+                    }
+
+                    if (outgoing != null)
+                    {
+                        outgoing.OutTransition = transition;
+                        outgoing.OutTransitionStart =
+                            Math.Max(0, overlap.StartSeconds - outgoing.Clip.StartSeconds);
+                        outgoing.OutTransitionDuration = duration;
+                        outgoing.OutTransitionOverlap = true;
+                        outgoing.FadeOutAt = -1;
+                        outgoing.FadeOut = 0;
+                    }
+
+                    continue;
+                }
+
                 if (incoming != null)
                     incoming.FadeIn = duration;
 
-                var outgoing = clips.FirstOrDefault(c => c.Clip.Id == overlap.Outgoing.Id);
                 if (outgoing != null)
                 {
                     outgoing.FadeOutAt = Math.Max(0, overlap.StartSeconds - outgoing.Clip.StartSeconds);
@@ -404,8 +492,72 @@ public static class ExportService
         }
     }
 
+    /// <summary>
+    /// Attaches transitions that sit at the open start/end of a clip. Overlap
+    /// transitions were already attached by <see cref="ApplyOverlaps"/>.
+    /// </summary>
+    private static void ApplyTransitions(List<ClipInput> clips)
+    {
+        foreach (var clip in clips)
+        {
+            if (!clip.Visual) continue;
+
+            if (clip.InTransition == null &&
+                clip.Clip.TransitionIn is { Enabled: true } transitionIn)
+            {
+                var duration = Math.Clamp(TransitionCatalog.Duration(transitionIn),
+                    0.05, Math.Max(0.05, clip.Duration));
+                clip.InTransition = transitionIn;
+                clip.InTransitionStart = 0;
+                clip.InTransitionDuration = duration;
+                clip.InTransitionOverlap = false;
+            }
+
+            if (clip.OutTransition == null &&
+                clip.Clip.TransitionOut is { Enabled: true } transitionOut)
+            {
+                var duration = Math.Clamp(TransitionCatalog.Duration(transitionOut),
+                    0.05, Math.Max(0.05, clip.Duration));
+                clip.OutTransition = transitionOut;
+                clip.OutTransitionStart = Math.Max(0, clip.Duration - duration);
+                clip.OutTransitionDuration = duration;
+                clip.OutTransitionOverlap = false;
+            }
+        }
+    }
+
+    private static List<FlashRegion> CollectFlashRegions(List<ClipInput> clips)
+    {
+        var regions = new List<FlashRegion>();
+
+        void Add(double start, double duration, ClipTransition transition)
+        {
+            if (duration <= 0.01) return;
+            var strength = Math.Clamp(transition.Get("strength", 0.9), 0, 1);
+            if (strength <= 0.01) return;
+            if (regions.Any(r => Math.Abs(r.Start - start) < 0.01 &&
+                                 Math.Abs(r.Duration - duration) < 0.01))
+            {
+                return;
+            }
+
+            regions.Add(new FlashRegion(start, duration, strength));
+        }
+
+        foreach (var clip in clips.Where(c => c.Visual))
+        {
+            if (clip.InTransition is { Kind: TransitionKind.Flash } transitionIn)
+                Add(clip.Start + clip.InTransitionStart, clip.InTransitionDuration, transitionIn);
+
+            if (clip.OutTransition is { Kind: TransitionKind.Flash } transitionOut)
+                Add(clip.Start + clip.OutTransitionStart, clip.OutTransitionDuration, transitionOut);
+        }
+
+        return regions;
+    }
+
     private static string BuildGraph(List<ClipInput> clips, ExportPreset preset,
-        double total, int silenceIndex)
+        double total, int silenceIndex, IReadOnlyList<FlashRegion> flashRegions)
     {
         var fps = preset.Fps.ToString("0.###", CultureInfo.InvariantCulture);
         var width = preset.Width.ToString(CultureInfo.InvariantCulture);
@@ -498,6 +650,51 @@ public static class ExportService
                             ":alpha=1");
             }
 
+            // A dissolve is an alpha fade. A flash crossfades quickly around
+            // its midpoint so the white card hides the cut; an edge flash fades
+            // over the whole transition.
+            if (clip.InTransition is { } transitionIn)
+            {
+                if (transitionIn.Kind == TransitionKind.Dissolve)
+                {
+                    filters.Add("fade=t=in:st=" + F(clip.InTransitionStart) +
+                                ":d=" + F(clip.InTransitionDuration) + ":alpha=1");
+                }
+                else if (transitionIn.Kind == TransitionKind.Flash)
+                {
+                    var flashDuration = clip.InTransitionDuration;
+                    var flashStart = clip.InTransitionOverlap
+                        ? clip.InTransitionStart + flashDuration * 0.35
+                        : clip.InTransitionStart;
+                    var flashLength = clip.InTransitionOverlap
+                        ? flashDuration * 0.3
+                        : flashDuration;
+                    filters.Add("fade=t=in:st=" + F(flashStart) +
+                                ":d=" + F(flashLength) + ":alpha=1");
+                }
+            }
+
+            if (clip.OutTransition is { } transitionOut)
+            {
+                if (transitionOut.Kind == TransitionKind.Dissolve && !clip.OutTransitionOverlap)
+                {
+                    filters.Add("fade=t=out:st=" + F(clip.OutTransitionStart) +
+                                ":d=" + F(clip.OutTransitionDuration) + ":alpha=1");
+                }
+                else if (transitionOut.Kind == TransitionKind.Flash)
+                {
+                    var flashDuration = clip.OutTransitionDuration;
+                    var flashStart = clip.OutTransitionOverlap
+                        ? clip.OutTransitionStart + flashDuration * 0.35
+                        : clip.OutTransitionStart;
+                    var flashLength = clip.OutTransitionOverlap
+                        ? flashDuration * 0.3
+                        : flashDuration;
+                    filters.Add("fade=t=out:st=" + F(flashStart) +
+                                ":d=" + F(flashLength) + ":alpha=1");
+                }
+            }
+
             if (clip.ManualIn > 0.01)
             {
                 filters.Add("fade=t=in:st=0:d=" +
@@ -514,14 +711,70 @@ public static class ExportService
                             ":alpha=1");
             }
 
-            filters.Add($"setpts=PTS+{start}/TB");
-            Emit($"[v{i}]");
+            var reveals = BuildRevealTransitions(clip);
+            if (reveals.Count == 0)
+            {
+                filters.Add($"setpts=PTS+{start}/TB");
+                Emit($"[v{i}]");
+            }
+            else
+            {
+                // Wipe/Iris are alpha masks. Emit the picture first, then split
+                // it so its own alpha (opacity/fades) can be multiplied by the
+                // moving mask without losing it.
+                Emit($"[pre{i}]");
 
+                foreach (var reveal in reveals)
+                {
+                    var mask = AddRevealMask(parts, clip, i, reveal, contentW, contentH, fps);
+                    var first = $"ra{i}_{reveal.Index}";
+                    var second = $"rb{i}_{reveal.Index}";
+                    var alpha = $"ca{i}_{reveal.Index}";
+                    var merged = $"ma{i}_{reveal.Index}";
+                    var output = $"rv{i}_{reveal.Index}";
+
+                    parts.Add($"{chainLabel}format=rgba,split=2[{first}][{second}]");
+                    parts.Add($"[{first}]alphaextract[{alpha}]");
+                    parts.Add($"[{alpha}]{mask}blend=all_mode=multiply[{merged}]");
+                    parts.Add($"[{second}][{merged}]alphamerge[{output}]");
+                    chainLabel = $"[{output}]";
+                }
+
+                filters.Add($"setpts=PTS+{start}/TB");
+                Emit($"[v{i}]");
+            }
+
+            var (xExpression, yExpression) =
+                BuildOverlayExpressions(clip, preset, placeX, placeY);
             var nextBase = $"b{i + 1}";
-            parts.Add($"[{baseLabel}][v{i}]overlay=x={placeX}:y={placeY}:" +
+            parts.Add($"[{baseLabel}][v{i}]overlay=x='{xExpression}':y='{yExpression}':" +
                       $"eof_action=pass:repeatlast=0:" +
                       $"enable='between(t,{start},{end})'[{nextBase}]");
             baseLabel = nextBase;
+        }
+
+        // Flash cards are drawn over the finished stack, so both sides of an
+        // overlap flash together instead of the incoming clip hiding the flash.
+        var flashIndex = 0;
+        foreach (var flash in flashRegions)
+        {
+            var flashDuration = Math.Max(0.05, flash.Duration);
+            var half = flashDuration / 2;
+            var flashStart = F(flash.Start);
+            var flashEnd = F(flash.Start + flashDuration);
+            var label = $"fl{flashIndex}";
+            var nextBase = $"bf{flashIndex}";
+
+            parts.Add($"color=c=white:s={width}x{height}:r={fps}:d={F(flashDuration)}," +
+                      "format=rgba," +
+                      $"fade=t=in:st=0:d={F(half)}:alpha=1," +
+                      $"fade=t=out:st={F(half)}:d={F(half)}:alpha=1," +
+                      $"colorchannelmixer=aa={F(flash.Strength)}," +
+                      $"setpts=PTS+{flashStart}/TB[{label}]");
+            parts.Add($"[{baseLabel}][{label}]overlay=0:0:eof_action=pass:repeatlast=0:" +
+                      $"enable='between(t,{flashStart},{flashEnd})'[{nextBase}]");
+            baseLabel = nextBase;
+            flashIndex++;
         }
 
         parts.Add($"[{baseLabel}]format=yuv420p[v]");
@@ -546,6 +799,18 @@ public static class ExportService
                 chain += BuildAtempo(clip.Rate) + ",";
 
             chain += $"volume={volume},";
+
+            if (clip.InTransition != null)
+            {
+                chain += "afade=t=in:st=" + F(clip.InTransitionStart) +
+                         ":d=" + F(clip.InTransitionDuration) + ",";
+            }
+
+            if (clip.OutTransition != null)
+            {
+                chain += "afade=t=out:st=" + F(clip.OutTransitionStart) +
+                         ":d=" + F(clip.OutTransitionDuration) + ",";
+            }
 
             if (clip.FadeIn > 0.01)
             {
@@ -594,6 +859,169 @@ public static class ExportService
         }
 
         return string.Join(";", parts);
+    }
+
+    private static string F(double value) =>
+        value.ToString("0.######", CultureInfo.InvariantCulture);
+
+    private static List<RevealTransition> BuildRevealTransitions(ClipInput clip)
+    {
+        var list = new List<RevealTransition>(2);
+
+        if (clip.InTransition is { } transitionIn &&
+            transitionIn.Kind is TransitionKind.Wipe or TransitionKind.Iris)
+        {
+            list.Add(new RevealTransition(transitionIn, clip.InTransitionStart,
+                clip.InTransitionDuration, true, list.Count));
+        }
+
+        if (clip.OutTransition is { } transitionOut &&
+            !clip.OutTransitionOverlap &&
+            transitionOut.Kind is TransitionKind.Wipe or TransitionKind.Iris)
+        {
+            list.Add(new RevealTransition(transitionOut, clip.OutTransitionStart,
+                clip.OutTransitionDuration, false, list.Count));
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// Builds a grayscale reveal mask at the clip's placed size. The mask is
+    /// animated only for the transition duration, then padded so it covers the
+    /// rest of the clip without evaluating the per-pixel expression.
+    /// </summary>
+    private static string AddRevealMask(List<string> parts, ClipInput clip, int clipIndex,
+        RevealTransition reveal, string width, string height, string fps)
+    {
+        var duration = Math.Max(0.05, Math.Min(reveal.Duration,
+            Math.Max(0.05, clip.Duration - Math.Max(0, reveal.Start))));
+        var feather = Math.Clamp(reveal.Transition.Get("feather", 0.06), 0, 0.5);
+        var f = Math.Max(feather, 0.002);
+        var direction = TransitionCatalog.Direction(reveal.Transition);
+
+        string coord;
+        string progress;
+        if (reveal.Transition.Kind == TransitionKind.Iris)
+        {
+            coord = "hypot(X-W/2,Y-H/2)/hypot(W/2,H/2)";
+            progress = $"T/{F(duration)}*1.1";
+        }
+        else
+        {
+            coord = direction switch
+            {
+                0 => "1-X/W",
+                1 => "X/W",
+                2 => "1-Y/H",
+                _ => "Y/H"
+            };
+            progress = $"T/{F(duration)}";
+        }
+
+        var mask = $"clip(({progress}+{F(f)}-({coord}))/(2*{F(f)}),0,1)*255";
+        if (!reveal.Incoming) mask = $"255-({mask})";
+
+        var maskLabel = $"m{clipIndex}_{reveal.Index}";
+        var raw = $"mr{clipIndex}_{reveal.Index}";
+        parts.Add($"nullsrc=s={width}x{height}:r={fps}:d={F(duration)}," +
+                  $"format=gray,geq=lum='{mask}'[{raw}]");
+
+        if (reveal.Start > 0.001)
+        {
+            var color = reveal.Incoming ? "black" : "white";
+            var next = $"{raw}s";
+            parts.Add($"[{raw}]tpad=start_duration={F(reveal.Start)}:" +
+                      $"start_mode=add:color={color}[{next}]");
+            raw = next;
+        }
+
+        var remaining = clip.Duration - reveal.Start - duration;
+        if (remaining > 0.001)
+        {
+            var color = reveal.Incoming ? "white" : "black";
+            var next = $"{raw}e";
+            parts.Add($"[{raw}]tpad=stop_duration={F(remaining)}:" +
+                      $"stop_mode=add:color={color}[{next}]");
+            raw = next;
+        }
+
+        if (!string.Equals(raw, maskLabel, StringComparison.Ordinal))
+            parts.Add($"[{raw}]null[{maskLabel}]");
+
+        return $"[{maskLabel}]";
+    }
+
+    /// <summary>
+    /// Builds the overlay x/y expressions. Slides and pushes animate the clip's
+    /// position with the same smoothstep the monitor uses; everything else keeps
+    /// the static placement.
+    /// </summary>
+    private static (string X, string Y) BuildOverlayExpressions(
+        ClipInput clip, ExportPreset preset, string placeX, string placeY)
+    {
+        var x = placeX;
+        var y = placeY;
+
+        void Add(ClipTransition? transition, double start, double duration, bool outgoing)
+        {
+            if (transition == null || duration <= 0.001) return;
+            if (transition.Kind is not (TransitionKind.Slide or
+                TransitionKind.Push or TransitionKind.Cross))
+            {
+                return;
+            }
+
+            if (transition.Kind == TransitionKind.Slide &&
+                outgoing && clip.OutTransitionOverlap)
+            {
+                return;
+            }
+
+            var absoluteStart = clip.Start + start;
+            var absoluteEnd = absoluteStart + duration;
+            var p = $"clip((t-{F(absoluteStart)})/{F(duration)},0,1)";
+            var eased = $"({p}*{p}*(3-2*{p}))";
+            var (vx, vy) = TransitionCatalog.DirectionVector(
+                TransitionCatalog.Direction(transition));
+
+            string dx;
+            string dy;
+            switch (transition.Kind)
+            {
+                case TransitionKind.Slide when outgoing:
+                    dx = $"{F(vx)}*{eased}";
+                    dy = $"{F(vy)}*{eased}";
+                    break;
+                case TransitionKind.Slide:
+                    dx = $"-{F(vx)}*(1-{eased})";
+                    dy = $"-{F(vy)}*(1-{eased})";
+                    break;
+                case TransitionKind.Push when outgoing:
+                    dx = $"{F(vx)}*{eased}";
+                    dy = $"{F(vy)}*{eased}";
+                    break;
+                case TransitionKind.Push:
+                    dx = $"-{F(vx)}*(1-{eased})";
+                    dy = $"-{F(vy)}*(1-{eased})";
+                    break;
+                default: // Cross
+                    dx = outgoing ? $"-{eased}" : $"1-{eased}";
+                    dy = outgoing ? $"-{eased}" : $"1-{eased}";
+                    break;
+            }
+
+            var termX = $"if(between(t,{F(absoluteStart)},{F(absoluteEnd)})," +
+                        $"({dx})*{preset.Width},0)";
+            var termY = $"if(between(t,{F(absoluteStart)},{F(absoluteEnd)})," +
+                        $"({dy})*{preset.Height},0)";
+            x = $"({x}+{termX})";
+            y = $"({y}+{termY})";
+        }
+
+        Add(clip.InTransition, clip.InTransitionStart, clip.InTransitionDuration, false);
+        Add(clip.OutTransition, clip.OutTransitionStart, clip.OutTransitionDuration, true);
+        return (x, y);
     }
 
     /// <summary>

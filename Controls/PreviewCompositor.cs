@@ -49,6 +49,14 @@ public sealed class PreviewLayer
     public double KeyBlue { get; init; }
     public double KeySimilarity { get; init; }
     public double KeyBlend { get; init; }
+
+    /// <summary>Transition reveal: 1 = fully visible, 0 = fully hidden.</summary>
+    public double Reveal { get; init; } = 1;
+
+    /// <summary>0 = none, 1 = left→right, 2 = right→left, 3 = top→down, 4 = bottom→up, 5 = iris.</summary>
+    public int RevealMode { get; init; }
+
+    public double RevealFeather { get; init; }
 }
 
 /// <summary>
@@ -83,6 +91,7 @@ public sealed class PreviewCompositor : HwndHost
     private int _uScale = -1, _uOffset = -1, _uTex = -1, _uAlpha = -1;
     private int _uUvScale = -1, _uUvOffset = -1;
     private int _uChromaKey = -1, _uKeyColor = -1, _uKeySimilarity = -1, _uKeyBlend = -1;
+    private int _uReveal = -1, _uRevealMode = -1, _uRevealFeather = -1, _uSolid = -1;
 
     public event EventHandler Failed;
 
@@ -117,6 +126,9 @@ public sealed class PreviewCompositor : HwndHost
     public bool IsReady => _ready;
     public string Error => _error;
     public double FrameAspect { get; set; } = 16.0 / 9.0;
+
+    /// <summary>White flash overlay for the Flash transition (0..1).</summary>
+    public double Flash { get; set; }
 
     /// <summary>Grabs the last rendered source frame of a layer (for the crop editor).</summary>
     public bool TryCaptureLayer(Guid key, out BitmapSource image)
@@ -265,6 +277,9 @@ public sealed class PreviewCompositor : HwndHost
         layer.KeyBlue = spec.KeyBlue;
         layer.KeySimilarity = spec.KeySimilarity;
         layer.KeyBlend = spec.KeyBlend;
+        layer.Reveal = Math.Clamp(spec.Reveal, 0, 1);
+        layer.RevealMode = spec.RevealMode;
+        layer.RevealFeather = Math.Clamp(spec.RevealFeather, 0, 0.5);
 
         if (!string.Equals(layer.Path, spec.Path, StringComparison.OrdinalIgnoreCase))
         {
@@ -453,6 +468,10 @@ public sealed class PreviewCompositor : HwndHost
             _glUniform2f(_uOffset, offsetX, offsetY);
             _glUniform1f(_uAlpha, (float)layer.Opacity);
             _glUniform1i(_uChromaKey, layer.ChromaKey ? 1 : 0);
+            _glUniform1i(_uSolid, 0);
+            _glUniform1i(_uRevealMode, layer.RevealMode);
+            _glUniform1f(_uReveal, (float)layer.Reveal);
+            _glUniform1f(_uRevealFeather, (float)layer.RevealFeather);
             if (layer.ChromaKey)
             {
                 _glUniform3f(_uKeyColor, (float)layer.KeyRed,
@@ -468,6 +487,26 @@ public sealed class PreviewCompositor : HwndHost
 
             glBindTexture(GL_TEXTURE_2D, layer.Texture);
             glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+
+        // Flash transition: a white card over the project frame, peaking at the
+        // middle of the transition. It is drawn after the layers so it covers
+        // both pictures, and it never covers the letterbox bars.
+        if (Flash > 0.002 && frame.Width > 0 && frame.Height > 0)
+        {
+            _glUniform1i(_uSolid, 1);
+            _glUniform1i(_uRevealMode, 0);
+            _glUniform1i(_uChromaKey, 0);
+            _glUniform1f(_uAlpha, (float)Math.Clamp(Flash, 0, 1));
+            _glUniform2f(_uScale, (float)(frame.Width / (double)_pixelW),
+                (float)(frame.Height / (double)_pixelH));
+            _glUniform2f(_uOffset,
+                (float)((frame.X + frame.Width / 2.0) / _pixelW * 2 - 1),
+                (float)(1 - (frame.Y + frame.Height / 2.0) / _pixelH * 2));
+            _glUniform2f(_uUvScale, 1, 1);
+            _glUniform2f(_uUvOffset, 0, 0);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            _glUniform1i(_uSolid, 0);
         }
     }
 
@@ -622,21 +661,34 @@ uniform vec2 uOffset;
 uniform vec2 uUvScale;
 uniform vec2 uUvOffset;
 varying vec2 vUv;
+varying vec2 vQuad;
 void main()
 {
     gl_Position = vec4(aPos * uScale + uOffset, 0.0, 1.0);
     vUv = aUv * uUvScale + uUvOffset;
+    vQuad = aUv;
 }";
         const string fs = @"#version 110
 varying vec2 vUv;
+varying vec2 vQuad;
 uniform sampler2D uTex;
 uniform float uAlpha;
 uniform int uChromaKey;
 uniform vec3 uKeyColor;
 uniform float uKeySimilarity;
 uniform float uKeyBlend;
+uniform float uReveal;
+uniform int uRevealMode;
+uniform float uRevealFeather;
+uniform int uSolid;
 void main()
 {
+    if (uSolid == 1)
+    {
+        gl_FragColor = vec4(1.0, 1.0, 1.0, uAlpha);
+        return;
+    }
+
     vec4 c = texture2D(uTex, vUv);
     float alpha = uAlpha;
     if (uChromaKey == 1)
@@ -646,6 +698,28 @@ void main()
         float outer = inner + uKeyBlend * 1.2 + 0.004;
         alpha *= smoothstep(inner, outer, d);
     }
+
+    if (uRevealMode > 0)
+    {
+        float f = max(uRevealFeather, 0.001);
+        float m;
+        if (uRevealMode == 5)
+        {
+            float d = distance(vQuad, vec2(0.5));
+            m = clamp((uReveal * 0.75 + f - d) / (2.0 * f), 0.0, 1.0);
+        }
+        else
+        {
+            float coord;
+            if (uRevealMode == 1) coord = vQuad.x;
+            else if (uRevealMode == 2) coord = 1.0 - vQuad.x;
+            else if (uRevealMode == 3) coord = vQuad.y;
+            else coord = 1.0 - vQuad.y;
+            m = clamp((uReveal + f - coord) / (2.0 * f), 0.0, 1.0);
+        }
+        alpha *= m;
+    }
+
     gl_FragColor = vec4(c.rgb, alpha);
 }";
 
@@ -668,6 +742,10 @@ void main()
         _uKeyColor = _glGetUniformLocation(_program, "uKeyColor");
         _uKeySimilarity = _glGetUniformLocation(_program, "uKeySimilarity");
         _uKeyBlend = _glGetUniformLocation(_program, "uKeyBlend");
+        _uReveal = _glGetUniformLocation(_program, "uReveal");
+        _uRevealMode = _glGetUniformLocation(_program, "uRevealMode");
+        _uRevealFeather = _glGetUniformLocation(_program, "uRevealFeather");
+        _uSolid = _glGetUniformLocation(_program, "uSolid");
 
         var verts = new float[]
         {
@@ -761,6 +839,9 @@ void main()
         public bool ChromaKey;
         public double KeyRed, KeyGreen, KeyBlue;
         public double KeySimilarity, KeyBlend;
+        public double Reveal = 1;
+        public int RevealMode;
+        public double RevealFeather;
 
         public LayerState(PreviewCompositor owner) => _owner = owner;
 

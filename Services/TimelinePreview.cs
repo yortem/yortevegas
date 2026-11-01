@@ -299,6 +299,7 @@ public sealed class TimelinePreview
     {
         var specs = new List<PreviewLayer>(4);
         var anySolo = _project.Tracks.Any(t => t.IsSolo);
+        var flash = 0.0;
 
         // Visual layers, bottom track first (Video N ... Video 1).
         foreach (var track in _project.Tracks.Reverse())
@@ -321,25 +322,37 @@ public sealed class TimelinePreview
                 var alpha = clip.Opacity;
                 var gain = audible ? clip.Volume : 0;
 
-                if (overlap != null)
+                var transitionState = TransitionAt(track, clip, time);
+                LayerTransition layerTransition;
+                if (transitionState is { } state)
                 {
-                    var progress = Math.Clamp(
-                        (time - overlap.StartSeconds) /
-                        Math.Max(0.0001, overlap.EndSeconds - overlap.StartSeconds), 0, 1);
-                    var eased = Ease(progress, clip.FadeCurve);
+                    layerTransition = BuildLayerTransition(state, out var transitionFlash);
+                    flash = Math.Max(flash, transitionFlash);
+                }
+                else
+                {
+                    layerTransition = LayerTransition.None;
 
-                    if (clip.Id == overlap.Incoming.Id)
+                    if (overlap != null)
                     {
-                        alpha *= eased;
-                        gain *= eased;
-                    }
-                    else if (clip.Id == overlap.Outgoing.Id)
-                    {
-                        gain *= 1 - eased;
+                        var progress = Math.Clamp(
+                            (time - overlap.StartSeconds) /
+                            Math.Max(0.0001, overlap.EndSeconds - overlap.StartSeconds), 0, 1);
+                        var eased = Ease(progress, clip.FadeCurve);
+
+                        if (clip.Id == overlap.Incoming.Id)
+                        {
+                            alpha *= eased;
+                            gain *= eased;
+                        }
+                        else if (clip.Id == overlap.Outgoing.Id)
+                        {
+                            gain *= 1 - eased;
+                        }
                     }
                 }
 
-                AddLayer(specs, clip, time, alpha, gain, visual: true);
+                AddLayer(specs, clip, time, alpha, gain, visual: true, layerTransition);
             }
         }
 
@@ -372,11 +385,163 @@ public sealed class TimelinePreview
                     else if (clip.Id == overlap.Outgoing.Id) gain *= 1 - eased;
                 }
 
-                AddLayer(specs, clip, time, alpha: 1, gain, visual: false);
+                AddLayer(specs, clip, time, alpha: 1, gain, visual: false, LayerTransition.None);
             }
         }
 
+        _compositor.Flash = flash;
         return specs;
+    }
+
+    private readonly record struct TransitionState(
+        ClipTransition Transition, double Progress, bool Outgoing, bool OnOverlap);
+
+    /// <summary>
+    /// Finds the transition that applies to a clip at this instant. An overlap
+    /// wins over the clip's own edges, so a dropped transition always works on
+    /// the crossfade it was dropped on.
+    /// </summary>
+    private TransitionState? TransitionAt(TimelineTrack track, TimelineClip clip, double time)
+    {
+        var overlap = _project.GetOverlaps(track)
+            .FirstOrDefault(o => time >= o.StartSeconds && time < o.EndSeconds);
+
+        if (overlap != null &&
+            (clip.Id == overlap.Incoming.Id || clip.Id == overlap.Outgoing.Id))
+        {
+            var transition = overlap.Incoming.TransitionIn;
+            if (transition is not { Enabled: true }) transition = overlap.Outgoing.TransitionOut;
+            if (transition is not { Enabled: true }) return null;
+
+            var progress = Math.Clamp(
+                (time - overlap.StartSeconds) /
+                Math.Max(0.0001, overlap.EndSeconds - overlap.StartSeconds), 0, 1);
+            return new TransitionState(transition, progress,
+                clip.Id == overlap.Outgoing.Id, true);
+        }
+
+        if (clip.TransitionIn is { Enabled: true } transitionIn)
+        {
+            var duration = Math.Clamp(TransitionCatalog.Duration(transitionIn), 0.05,
+                Math.Max(0.05, clip.DurationSeconds));
+            if (time >= clip.StartSeconds - Epsilon &&
+                time < clip.StartSeconds + duration - Epsilon)
+            {
+                return new TransitionState(transitionIn,
+                    Math.Clamp((time - clip.StartSeconds) / duration, 0, 1), false, false);
+            }
+        }
+
+        if (clip.TransitionOut is { Enabled: true } transitionOut)
+        {
+            var duration = Math.Clamp(TransitionCatalog.Duration(transitionOut), 0.05,
+                Math.Max(0.05, clip.DurationSeconds));
+            var start = clip.EndSeconds - duration;
+            if (time >= start - Epsilon && time < clip.EndSeconds - Epsilon)
+            {
+                return new TransitionState(transitionOut,
+                    Math.Clamp((time - start) / duration, 0, 1), true, false);
+            }
+        }
+
+        return null;
+    }
+
+    private readonly record struct LayerTransition(
+        double AlphaMul, double GainMul,
+        double OffsetX, double OffsetY, double ScaleMul,
+        double Reveal, int RevealMode, double Feather)
+    {
+        public static readonly LayerTransition None =
+            new(1, 1, 0, 0, 1, 1, 0, 0);
+    }
+
+    private static LayerTransition BuildLayerTransition(TransitionState state, out double flash)
+    {
+        flash = 0;
+        var transition = state.Transition;
+        var eased = TransitionCatalog.Ease(state.Progress);
+        var direction = TransitionCatalog.Direction(transition);
+        var gain = state.Outgoing ? 1 - state.Progress : state.Progress;
+
+        // On an overlap the outgoing picture stays under the incoming one; the
+        // incoming transition supplies the visual change. Off an overlap the
+        // outgoing clip has to fade/slide out on its own.
+        var alpha = 1.0;
+
+        switch (transition.Kind)
+        {
+            case TransitionKind.Dissolve:
+                if (state.Outgoing)
+                    alpha = state.OnOverlap ? 1 : 1 - eased;
+                else
+                    alpha = eased;
+                break;
+
+            case TransitionKind.Flash:
+                flash = Math.Clamp(transition.Get("strength", 0.9), 0, 1) *
+                        Math.Sin(Math.PI * state.Progress);
+                if (state.OnOverlap)
+                {
+                    // Keep the outgoing picture until the flash peaks, then
+                    // reveal the incoming one under the white card.
+                    var cut = TransitionCatalog.Ease(
+                        Math.Clamp((state.Progress - 0.35) / 0.3, 0, 1));
+                    alpha = state.Outgoing ? 1 - cut : cut;
+                }
+                else
+                {
+                    alpha = state.Outgoing ? 1 - eased : eased;
+                }
+                break;
+
+            case TransitionKind.Slide:
+            {
+                var v = TransitionCatalog.DirectionVector(direction);
+                if (state.Outgoing)
+                {
+                    if (!state.OnOverlap)
+                        return new LayerTransition(alpha, gain,
+                            v.X * eased, v.Y * eased, 1, 1, 0, 0);
+                }
+                else
+                {
+                    return new LayerTransition(alpha, gain,
+                        -v.X * (1 - eased), -v.Y * (1 - eased), 1, 1, 0, 0);
+                }
+                break;
+            }
+
+            case TransitionKind.Push:
+            {
+                var v = TransitionCatalog.DirectionVector(direction);
+                return state.Outgoing
+                    ? new LayerTransition(alpha, gain,
+                        v.X * eased, v.Y * eased, 1, 1, 0, 0)
+                    : new LayerTransition(alpha, gain,
+                        -v.X * (1 - eased), -v.Y * (1 - eased), 1, 1, 0, 0);
+            }
+
+            case TransitionKind.Cross:
+                return state.Outgoing
+                    ? new LayerTransition(alpha, gain,
+                        -eased, -eased, 1, 1, 0, 0)
+                    : new LayerTransition(alpha, gain,
+                        1 - eased, 1 - eased, 1, 1, 0, 0);
+
+            case TransitionKind.Wipe:
+            case TransitionKind.Iris:
+            {
+                var reveal = state.Outgoing
+                    ? (state.OnOverlap ? 1 : 1 - eased)
+                    : eased;
+                return new LayerTransition(alpha, gain, 0, 0, 1, reveal,
+                    TransitionCatalog.RevealMode(transition.Kind, direction),
+                    Math.Clamp(transition.Get("feather", 0.06), 0, 0.5));
+            }
+        }
+
+        return new LayerTransition(alpha, gain, 0, 0, 1, 1, 0, 0);
     }
 
     /// <summary>
@@ -430,7 +595,7 @@ public sealed class TimelinePreview
     }
 
     private void AddLayer(List<PreviewLayer> specs, TimelineClip clip, double time,
-        double alpha, double gain, bool visual)
+        double alpha, double gain, bool visual, LayerTransition transition)
     {
         var asset = _project.FindAsset(clip.AssetId);
         if (asset == null || asset.IsMissing || !File.Exists(asset.FilePath)) return;
@@ -439,6 +604,8 @@ public sealed class TimelinePreview
         var manualFade = ManualFadeFactor(clip, time);
         alpha *= manualFade;
         gain *= manualFade;
+        alpha *= transition.AlphaMul;
+        gain *= transition.GainMul;
 
         if (asset.Peaks is { Length: > 0 } peaks && gain > 0.0001)
         {
@@ -488,16 +655,19 @@ public sealed class TimelinePreview
             CropBottom = clip.CropBottom,
             PanX = clip.PanX,
             PanY = clip.PanY,
-            Scale = clip.Scale,
-            PositionX = clip.PositionX,
-            PositionY = clip.PositionY,
+            Scale = Math.Clamp(clip.Scale * transition.ScaleMul, 0.05, 4),
+            PositionX = Math.Clamp(clip.PositionX + transition.OffsetX, -1, 1),
+            PositionY = Math.Clamp(clip.PositionY + transition.OffsetY, -1, 1),
             Filters = EffectCatalog.PreviewStack(clip.Effects),
             ChromaKey = chroma != null,
             KeyRed = 0,
             KeyGreen = keyBlue ? 0 : 1,
             KeyBlue = keyBlue ? 1 : 0,
             KeySimilarity = chroma?.Get("similarity", 0.12) ?? 0,
-            KeyBlend = chroma?.Get("blend", 0.15) ?? 0
+            KeyBlend = chroma?.Get("blend", 0.15) ?? 0,
+            Reveal = transition.Reveal,
+            RevealMode = transition.RevealMode,
+            RevealFeather = transition.Feather
         });
     }
 

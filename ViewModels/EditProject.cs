@@ -280,7 +280,9 @@ public sealed class EditProject : ObservableObject
                 Scale = item.Scale,
                 PositionX = item.PositionX,
                 PositionY = item.PositionY,
-                Effects = item.Effects.Select(e => e.Clone()).ToList()
+                Effects = item.Effects.Select(e => e.Clone()).ToList(),
+                TransitionIn = item.TransitionIn?.Clone(),
+                TransitionOut = item.TransitionOut?.Clone()
             };
             track.Clips.Add(clip);
             pasted.Add(clip);
@@ -601,11 +603,13 @@ public sealed class EditProject : ObservableObject
             Scale = clip.Scale,
             PositionX = clip.PositionX,
             PositionY = clip.PositionY,
-            Effects = clip.Effects.Select(e => e.Clone()).ToList()
+            Effects = clip.Effects.Select(e => e.Clone()).ToList(),
+            TransitionOut = clip.TransitionOut?.Clone()
         };
 
         clip.DurationSeconds = splitAt - clip.StartSeconds;
         clip.FadeOutSeconds = 0;
+        clip.TransitionOut = null;
         clip.FadeInSeconds = Math.Min(clip.FadeInSeconds, clip.DurationSeconds);
         track.Clips.Add(right);
         SelectedClipId = right.Id;
@@ -687,7 +691,9 @@ public sealed class EditProject : ObservableObject
             Scale = clip.Scale,
             PositionX = clip.PositionX,
             PositionY = clip.PositionY,
-            Effects = clip.Effects.Select(e => e.Clone()).ToList()
+            Effects = clip.Effects.Select(e => e.Clone()).ToList(),
+            TransitionIn = clip.TransitionIn?.Clone(),
+            TransitionOut = clip.TransitionOut?.Clone()
         };
         track.Clips.Add(copy);
         SelectedClipId = copy.Id;
@@ -728,6 +734,44 @@ public sealed class EditProject : ObservableObject
 
     /// <summary>Marks the project dirty after live effect parameter edits.</summary>
     public void NotifyEffectChanged() => NotifyTimelineChanged();
+
+    // ------------------------------------------------------------ transitions
+
+    /// <summary>
+    /// Replaces the transition on one clip edge. <paramref name="outgoing"/>
+    /// selects the end of the clip; otherwise the start.
+    /// </summary>
+    public ClipTransition SetTransition(TimelineClip clip, bool outgoing,
+        TransitionKind kind, IReadOnlyDictionary<string, double>? values = null)
+    {
+        var transition = TransitionCatalog.Create(kind);
+        if (values != null)
+        {
+            foreach (var pair in values)
+                transition.Set(pair.Key, pair.Value);
+        }
+
+        if (outgoing) clip.TransitionOut = transition;
+        else clip.TransitionIn = transition;
+
+        NotifyTimelineChanged();
+        return transition;
+    }
+
+    public bool RemoveTransition(TimelineClip clip, bool outgoing)
+    {
+        var had = outgoing ? clip.TransitionOut != null : clip.TransitionIn != null;
+        if (!had) return false;
+
+        if (outgoing) clip.TransitionOut = null;
+        else clip.TransitionIn = null;
+
+        NotifyTimelineChanged();
+        return true;
+    }
+
+    /// <summary>Marks the project dirty after a live transition parameter edit.</summary>
+    public void NotifyTransitionChanged() => NotifyTimelineChanged();
 
     public bool DeleteClip(TimelineClip clip)
     {

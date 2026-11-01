@@ -26,7 +26,6 @@ public static class EffectThumbnailService
     {
         var key = BuildKey(kind, values);
         if (Cache.TryGetValue(key, out var cached)) return cached;
-
         BitmapSource bitmap;
         if (kind == EffectKind.Crop)
         {
@@ -49,6 +48,16 @@ public static class EffectThumbnailService
         bitmap.Freeze();
         Cache[key] = bitmap;
         return bitmap;
+    }
+
+    /// <summary>
+    /// The built-in 240×135 BGRA sample, used by the transition thumbnails.
+    /// The returned array is a copy, so callers can tint or shift it freely.
+    /// </summary>
+    public static (int Width, int Height, byte[] Pixels) GetSamplePixels()
+    {
+        var pixels = _sample ??= CreateSample();
+        return (Width, Height, (byte[])pixels.Clone());
     }
 
     private static string BuildKey(EffectKind kind,

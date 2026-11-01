@@ -175,6 +175,20 @@ public sealed class TimelineClip : ObservableObject
 
     public int EnabledEffectCount => Effects.Count(e => e.Enabled);
 
+    /// <summary>
+    /// Transition at the start of the clip. On an overlap this is the transition
+    /// between the outgoing clip and this one; otherwise it runs from black.
+    /// </summary>
+    public ClipTransition? TransitionIn { get; set; }
+
+    /// <summary>
+    /// Transition at the end of the clip. On an overlap this is the transition
+    /// between this clip and the incoming one; otherwise it runs to black.
+    /// </summary>
+    public ClipTransition? TransitionOut { get; set; }
+
+    public bool HasTransitions => TransitionIn != null || TransitionOut != null;
+
     /// <summary>Manual fade-in at the start of the clip, in project seconds.</summary>
     public double FadeInSeconds
     {

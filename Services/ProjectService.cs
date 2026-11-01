@@ -99,7 +99,9 @@ public static class ProjectService
                         Kind = e.Kind,
                         Enabled = e.Enabled,
                         Values = new Dictionary<string, double>(e.Values)
-                    }).ToList()
+                    }).ToList(),
+                    TransitionIn = CaptureTransition(clip.TransitionIn),
+                    TransitionOut = CaptureTransition(clip.TransitionOut)
                 });
             }
             file.Tracks.Add(trackDto);
@@ -174,7 +176,9 @@ public static class ProjectService
                     Effects = (c.Effects ?? new List<EffectDto>()).Select(CreateEffect)
                         .Where(e => e != null)
                         .Select(e => e!)
-                        .ToList()
+                        .ToList(),
+                    TransitionIn = CreateTransition(c.TransitionIn),
+                    TransitionOut = CreateTransition(c.TransitionOut)
                 });
             }
             project.Tracks.Add(track);
@@ -212,6 +216,30 @@ public static class ProjectService
         foreach (var pair in dto.Values ?? new Dictionary<string, double>())
             effect.Values[pair.Key] = pair.Value;
         return effect;
+    }
+
+    private static TransitionDto? CaptureTransition(ClipTransition? transition) =>
+        transition == null
+            ? null
+            : new TransitionDto
+            {
+                Kind = transition.Kind,
+                Enabled = transition.Enabled,
+                Values = new Dictionary<string, double>(transition.Values)
+            };
+
+    /// <summary>Rebuilds a stored transition, merging the catalog defaults.</summary>
+    private static ClipTransition? CreateTransition(TransitionDto? dto)
+    {
+        if (dto == null) return null;
+
+        var transition = TransitionCatalog.TryCreate(dto.Kind);
+        if (transition == null) return null;
+
+        transition.Enabled = dto.Enabled;
+        foreach (var pair in dto.Values ?? new Dictionary<string, double>())
+            transition.Values[pair.Key] = pair.Value;
+        return transition;
     }
 
     /// <param name="relativeTo">
@@ -373,12 +401,22 @@ public sealed class ClipDto
     public double? PositionY { get; set; }
     public double? PlaybackRate { get; set; } = 1;
     public List<EffectDto> Effects { get; set; } = new();
+    public TransitionDto? TransitionIn { get; set; }
+    public TransitionDto? TransitionOut { get; set; }
 }
 
 /// <summary>One stored effect. Values are keyed so new parameters can be added.</summary>
 public sealed class EffectDto
 {
     public EffectKind Kind { get; set; }
+    public bool Enabled { get; set; } = true;
+    public Dictionary<string, double> Values { get; set; } = new();
+}
+
+/// <summary>One stored transition on a clip edge.</summary>
+public sealed class TransitionDto
+{
+    public TransitionKind Kind { get; set; }
     public bool Enabled { get; set; } = true;
     public Dictionary<string, double> Values { get; set; } = new();
 }

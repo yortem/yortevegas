@@ -48,6 +48,13 @@ crossfades and clip levels, preview the composited cut, and export a simple MP4.
   to remove it. **Crop** writes the clip's Crop/Pan box (halves, quarters or a custom
   rectangle); **Vignette** darkens the corners for an old-film look; **Chroma Keyer** keys
   green or blue in both the monitor and the export. Effects are saved in the project.
+- **Transitions** — the `⇄` button in the left rail opens a transition browser. Pick
+  **Dissolve**, **Flash**, **Cross Effect**, **Slide**, **Push**, **Wipe** or **Iris**,
+  then drag a preset onto a crossfade (the overlap of two clips) or onto the left/right
+  half of a clip for a start/end transition. Clicking a preset applies it to the selected
+  clip edge instead. Every transition has a duration, direction or soft-edge slider and
+  an ON/OFF switch; `✕` removes it. Transitions render in the monitor and the export and
+  are saved in the project.
 - **Editing aids** — snapping to clip edges and the playhead, frame-accurate stepping,
   zoom (mouse wheel, pointer-anchored; `+` / `-`), horizontal scrolling (`Shift` + wheel),
   vertical scrolling (`Alt` + wheel or the right scrollbar), ruler scrubbing that updates
